@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+*.egg
+
+# Node
+node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Environment
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+docker-data/
+
+# SSL / Secrets
+mongodb/ssl/
+*.pem
+*.key
+*.crt
+
+# Temp files
+temp_pdfs/
+logo-export.html
+spc-chart-preview.html
+
+# Reports
+*.generated.pdf

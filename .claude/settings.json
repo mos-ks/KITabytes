@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cmd.exe /c \"where python\")",
+      "Bash(cmd.exe /c \"where uv\")",
+      "Bash(curl -s \"http://localhost:8000/api/data/tests?customer=Company_1&limit=3\")",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\(''''Total:'''', d.get\\(''''total''''\\)\\); [print\\(t.get\\(''''parameters'''',{}\\).get\\(''''Date'''',''''?''''\\), t.get\\(''''parameters'''',{}\\).get\\(''''MATERIAL'''',''''?''''\\)\\) for t in d.get\\(''''tests'''',[]\\)]\")",
+      "Bash(curl -s \"http://localhost:8000/api/data/tests?customer=Company_1&material=Steel&test_type=tensile&limit=3\")",
+      "Bash(curl -s http://localhost:8000/api/chat/overview)",
+      "Bash(curl -s \"http://localhost:8000/api/data/summary?material=Steel&test_type=tensile&limit=200\")",
+      "Bash(while read:*)",
+      "Bash(do git:*)",
+      "Bash(done)",
+      "Bash(xargs ls:*)",
+      "Bash(openssl x509:*)",
+      "Bash(grep -r \"Adrian\\\\|Sven\\\\|Marco\\\\|Kevin\\\\|Benjamin\\\\|Thomas\\\\|Alexander\" /c/Users/sbeyt/Documents/KITabytes --include=*.py --include=*.md --include=*.json)",
+      "Bash(git config:*)",
+      "Bash(pip3 install:*)",
+      "Bash(pipx install:*)"
+    ]
+  }
+}

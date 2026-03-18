@@ -1,0 +1,13 @@
+version: "3.8"
+
+services:
+  mongo:
+    image: ghcr.io/svenstamm/txp-mongo:latest
+    ports:
+      - "27017:27017"
+    container_name: txp-database
+    volumes:
+      - mongo-data:/data/db
+
+volumes:
+  mongo-data:

@@ -1,0 +1,32 @@
+[project]
+name = "kitabytes"
+version = "0.1.0"
+description = "AI-powered materials testing analysis"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+  "fastapi==0.115.6",
+  "uvicorn[standard]==0.34.0",
+  "pymongo==4.9.2",
+  "motor==3.6.0",
+  "python-dotenv==1.0.1",
+  "anthropic==0.42.0",
+  "openai==1.58.1",
+  "pandas==2.2.3",
+  "numpy==2.2.1",
+  "pydantic==2.10.4",
+  "python-multipart==0.0.20",
+  "weasyprint==63.1",
+  "jinja2==3.1.5",
+  "scipy>=1.17.1",
+]
+
+[dependency-groups]
+dev = ["pytest==8.3.4"]
+
+[tool.pytest.ini_options]
+testpaths = ["backend/tests"]
+pythonpath = ["backend"]
+addopts = "-q"
+
+[tool.uv]
+package = false

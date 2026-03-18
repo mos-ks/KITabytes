@@ -1,0 +1,1672 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>A/MaTe — AI in Material Testing</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.plot.ly/plotly-2.35.0.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script>
+    tailwind.config = {
+      theme: { extend: {
+        colors: {
+          zwick: { primary: '#1a1a1a', secondary: '#E3000B', accent: '#E3000B', light: '#f5f5f5', dark: '#111111' },
+          surface: { 50: '#ffffff', 100: '#fafafa', 200: '#f0f0f0', 300: '#e0e0e0', 700: '#f5f5f5', 800: '#ffffff', 900: '#fafafa' },
+        },
+        fontFamily: { sans: ['Inter', 'sans-serif'], mono: ['JetBrains Mono', 'monospace'] },
+      }}
+    }
+  </script>
+  <style>
+    body { margin: 0; font-family: 'Inter', -apple-system, sans-serif; background: #ffffff; color: #1a1a1a; }
+    ::-webkit-scrollbar { width: 5px; }
+    ::-webkit-scrollbar-track { background: #f0f0f0; }
+    ::-webkit-scrollbar-thumb { background: #ccc; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #aaa; }
+    .chat-md p { margin-bottom: 0.5rem; }
+    .chat-md ul, .chat-md ol { margin-left: 1.5rem; margin-bottom: 0.5rem; }
+    .chat-md code { background: #f0f0f0; padding: 0.125rem 0.375rem; border-radius: 0.25rem; font-size: 0.8rem; font-family: 'JetBrains Mono', monospace; color: #c0392b; }
+    .chat-md pre { background: #fafafa; color: #1a1a1a; padding: 0.75rem; border-radius: 0.5rem; overflow-x: auto; border: 1px solid #e0e0e0; }
+    .chat-md pre code { background: none; color: inherit; padding: 0; }
+    .num { font-family: 'JetBrains Mono', monospace; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .animate-spin { animation: spin 1s linear infinite; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+    .fade-in { animation: fadeIn 0.3s ease-out; }
+    @keyframes pulse-glow { 0%, 100% { box-shadow: 0 0 0 0 rgba(227,0,11,0); } 50% { box-shadow: 0 0 12px 2px rgba(227,0,11,0.1); } }
+    .glow-subtle { animation: pulse-glow 3s ease-in-out infinite; }
+    .chat-sidebar { flex-shrink: 0; min-width: 280px; max-width: 70vw; }
+    .chat-sidebar.collapsed { width: 0; min-width: 0; overflow: hidden; }
+    .chat-sidebar.fullwidth { width: 100%; max-width: 100%; border-left: none; }
+    .resize-handle { width: 4px; cursor: col-resize; background: transparent; transition: background 0.2s; flex-shrink: 0; }
+    .resize-handle:hover, .resize-handle.active { background: #E3000B; }
+    @media print {
+      * { overflow: visible !important; color: #000 !important; }
+      body { background: white !important; -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+      #session-sidebar, .chat-sidebar, header, .no-print, .empty-block { display: none !important; }
+      #dashboard-area { background: white !important; }
+      #dashboard-area { padding: 10px !important; overflow: visible !important; height: auto !important; background: white !important; }
+      .h-screen { height: auto !important; }
+      .overflow-hidden, .overflow-auto { overflow: visible !important; }
+      .dashboard-grid { display: block !important; }
+      .dashboard-grid > * { break-inside: avoid; margin-bottom: 1rem; page-break-inside: avoid; border: 1px solid #ccc !important; background: white !important; }
+      .flex-1 { flex: none !important; width: 100% !important; }
+    }
+  </style>
+</head>
+<body class="bg-surface-900">
+  <div id="root"></div>
+
+  <script type="text/babel" data-type="module">
+    const { useState, useEffect, useRef, useCallback } = React;
+
+    // ─── API ─────────────────────────────────────────────────────
+    const API = '/api';
+    async function sendChat(message, cid = 'default') {
+      const res = await fetch(`${API}/chat/send`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message, conversation_id: cid }) });
+      if (!res.ok) throw new Error(await res.text());
+      return res.json();
+    }
+    // Separate conversation for widget card generation — doesn't block main chat
+    async function sendWidgetChat(message) {
+      return sendChat(message, 'widget_' + Date.now());
+    }
+    async function getOverview() { return (await fetch(`${API}/chat/overview`)).json(); }
+    async function resetChatApi(id = 'default') { await fetch(`${API}/chat/reset`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ conversation_id: id }) }); }
+    async function fetchChartData(cardType, title, metric, testIds, extra = {}) {
+      const parts = (metric || '').split('(');
+      const resultName = parts[0]?.trim() || metric;
+      const unitFilter = parts[1]?.replace(')', '').trim() || 'Stress';
+      const res = await fetch(`${API}/chat/chart-data`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ card_type: cardType, title, metric, test_ids: testIds || [], result_name: resultName, unit_filter: unitFilter, ...extra }) });
+      if (!res.ok) throw new Error(await res.text());
+      return res.json();
+    }
+
+    async function checkForUpdates(knownIds, material, testType, customer) {
+      const res = await fetch(`${API}/data/check-updates`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ known_test_ids: knownIds, material, test_type: testType, customer }) });
+      if (!res.ok) return { new_count: 0 };
+      return res.json();
+    }
+
+    // ─── Helpers ─────────────────────────────────────────────────
+    function Markdown({ text }) {
+      const html = marked.parse(text || '', { breaks: true });
+      return <div className="chat-md text-sm" dangerouslySetInnerHTML={{ __html: html }} />;
+    }
+    function parseCardProposals(text) {
+      // Match ```card_proposals, ```json, or bare ``` blocks containing JSON arrays with "type" keys
+      const patterns = [
+        /```card_proposals\n?([\s\S]*?)```/,
+        /```json\n?([\s\S]*?)```/,
+        /```\n?(\[[\s\S]*?\])\n?```/,
+      ];
+      for (const pat of patterns) {
+        const m = text.match(pat);
+        if (m) {
+          try {
+            const parsed = JSON.parse(m[1]);
+            if (Array.isArray(parsed) && parsed.length > 0 && parsed[0].type) return parsed;
+          } catch {}
+        }
+      }
+      return null;
+    }
+    function cleanResponse(text) {
+      return text.replace(/```(?:card_proposals|json)?\n?[\s\S]*?```/g, '').trim();
+    }
+    function parseDataPreview(toolCalls) {
+      for (const tc of (toolCalls || [])) {
+        if (tc.tool === 'get_summary_table' && Array.isArray(tc.result)) return { total: tc.result.length, rows: tc.result };
+        if (tc.tool === 'get_summary_table' && tc.result?.rows) return { total: tc.result.total || tc.result.rows.length, rows: tc.result.rows };
+        if (tc.tool === 'query_tests' && tc.result?.tests) {
+          return { total: tc.result.total || tc.result.tests.length, rows: tc.result.tests.map(t => ({
+            id: t.id, name: t.name, date: t.parameters?.Date || '', customer: t.parameters?.CUSTOMER || '',
+            material: t.parameters?.MATERIAL || '', test_type: t.parameters?.TYPE_OF_TESTING_STR || '',
+            machine: (t.parameters?.MACHINE_DATA || '').slice(0, 50), tester: t.parameters?.TESTER || '', state: t.state || '',
+          })) };
+        }
+      }
+      return null;
+    }
+    function extractTestIds(msgs) {
+      const ids = [];
+      for (const m of msgs) for (const tc of (m.toolCalls || [])) {
+        if (tc.tool === 'query_tests' && tc.result?.tests) tc.result.tests.forEach(t => t.id && ids.push(t.id));
+        if (tc.tool === 'get_summary_table' && Array.isArray(tc.result)) tc.result.forEach(t => t.id && ids.push(t.id));
+        if (tc.tool === 'get_summary_table' && tc.result?.rows) tc.result.rows.forEach(t => t.id && ids.push(t.id));
+      }
+      return [...new Set(ids)];
+    }
+    const Spinner = () => <svg className="animate-spin h-5 w-5 text-zwick-secondary" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg>;
+
+    // ─── Inline Chat Chart ────────────────────────────────────────
+    function InlineChatChart({ chart }) {
+      const plotRef = useRef(null);
+      useEffect(() => {
+        if (plotRef.current && chart.plotData) {
+          Plotly.newPlot(plotRef.current, chart.plotData.data, {
+            ...chart.plotData.layout,
+            shapes: chart.plotData.layout?.shapes || [],
+            annotations: chart.plotData.layout?.annotations || [],
+            autosize: true,
+            margin: { t: 30, r: (chart.plotData.layout?.annotations?.length > 0) ? 70 : 15, b: 40, l: 50 },
+            height: 250, font: { size: 10 },
+            paper_bgcolor: 'transparent', plot_bgcolor: '#fafafa',
+            xaxis: { ...chart.plotData.layout?.xaxis, gridcolor: '#eee', color: '#555', tickfont: { color: '#666', size: 9 } },
+            yaxis: { ...chart.plotData.layout?.yaxis, gridcolor: '#eee', color: '#555', tickfont: { color: '#666', size: 9 } },
+            legend: { font: { size: 8, color: '#444' }, bgcolor: 'transparent', orientation: 'h', y: -0.3, x: 0.5, xanchor: 'center' },
+          }, { responsive: true, displayModeBar: false });
+        }
+      }, [chart.plotData]);
+      return (
+        <div className="mt-2 border border-gray-200 rounded-lg overflow-hidden">
+          <div className="px-3 py-1.5 border-b border-gray-100 flex items-center justify-between">
+            <span className="text-xs font-semibold text-gray-700">{chart.title}</span>
+            {chart.subtitle && <span className="text-[10px] text-gray-400 num">{chart.subtitle}</span>}
+          </div>
+          {chart.stats && (
+            <div className="flex gap-3 px-3 py-1 border-b border-gray-100 text-[10px]">
+              {[['Mean', chart.stats.mean?.toFixed(2)], ['Std', chart.stats.std?.toFixed(2)], ['Min', chart.stats.min?.toFixed(2)], ['Max', chart.stats.max?.toFixed(2)]].map(([l, v]) => (
+                <span key={l} className="text-gray-500"><span className="text-gray-400">{l}:</span> <span className="num text-gray-700">{v}</span></span>
+              ))}
+            </div>
+          )}
+          <div ref={plotRef} />
+        </div>
+      );
+    }
+
+    // ─── Visualization Options ───────────────────────────────────
+    const DEFAULT_VIZ_OPTIONS = [
+      { id: 'stress_strain', label: 'Stress-Strain Curves', type: 'stress_strain', metric: 'stress_strain', desc: 'Overlay of all specimen curves' },
+      { id: 'max_force', label: 'Maximum Force', type: 'stat_summary', metric: 'Maximum force (Stress)', desc: 'Max force per specimen (MPa)' },
+      { id: 'youngs', label: "Young's Modulus", type: 'stat_summary', metric: "Young's modulus (Stress)", desc: "Stiffness per specimen (GPa)" },
+      { id: 'strain_break', label: 'Strain at Break', type: 'distribution', metric: 'Strain at break (Ratio)', desc: 'Distribution of strain at break (%)' },
+      { id: 'force_break', label: 'Force at Break', type: 'stat_summary', metric: 'Result Force at break (Stress)', desc: 'Force at break per specimen (MPa)' },
+      { id: 'work_break', label: 'Work to Break', type: 'stat_summary', metric: 'Work up to break (Energy)', desc: 'Energy absorbed per specimen' },
+    ];
+    function loadHiddenVizOptions() {
+      try { return JSON.parse(localStorage.getItem('aimate_hidden_viz') || '[]'); } catch { return []; }
+    }
+
+    // ─── Session Sidebar ─────────────────────────────────────────
+    function SessionSidebar({ sessions, activeSession, onSelect, onCreate, open }) {
+      if (!open) return null;
+      return (
+        <div id="session-sidebar" className="w-56 bg-gray-100 border-r  text-gray-700 flex flex-col flex-shrink-0">
+          <div className="p-3">
+            <button onClick={onCreate} className="w-full px-3 py-2 bg-zwick-secondary/10 hover:bg-zwick-secondary/20 border border-zwick-secondary/30 text-zwick-secondary rounded-lg text-sm font-medium transition-colors">+ New Dashboard</button>
+          </div>
+          <p className="px-3 pt-3 pb-1 text-[10px] text-gray-800 uppercase tracking-wider font-medium">Saved Dashboards</p>
+          <div className="flex-1 overflow-y-auto px-2 pb-2">
+            {sessions.map(s => (
+              <button key={s.id} onClick={() => onSelect(s.id)} className={`w-full text-left px-3 py-2 rounded-lg mb-1 transition-colors ${activeSession === s.id ? 'border border-zwick-secondary/30' : 'hover:bg-gray-50'}`}>
+                <p className={`text-sm truncate ${activeSession === s.id ? 'text-zwick-secondary font-medium' : 'text-gray-700'}`}>{s.name}</p>
+                <p className="text-[10px] text-gray-400 num">{s.testCount || '?'} tests • {s.createdAt || ''}</p>
+              </button>
+            ))}
+            {sessions.length === 0 && <p className="text-xs text-gray-400 p-3 text-center">No dashboards yet</p>}
+          </div>
+        </div>
+      );
+    }
+
+    // ─── Data Preview Table ──────────────────────────────────────
+    function DataPreviewTable({ preview }) {
+      if (!preview?.rows?.length) return null;
+      const cols = ['name','date','customer','material','test_type','tester'];
+      const labels = { name:'Specimen', date:'Date', customer:'Customer', material:'Material', test_type:'Type', tester:'Tester' };
+      const active = cols.filter(c => preview.rows.some(r => r[c]));
+      return (
+        <div className="border border-gray-200 rounded-lg overflow-hidden">
+          <div className="bg-gray-50 px-3 py-1.5 text-xs font-medium text-gray-600 border-b border-gray-200">
+            <span className="num text-zwick-secondary font-bold">{preview.total}</span> test{preview.total !== 1 ? 's' : ''} found
+            {preview.rows.length < preview.total && <span className="text-gray-400"> (showing {preview.rows.length})</span>}
+            {preview.rows[0]?.material && <> — <strong className="text-gray-800">{preview.rows[0].material}</strong></>}
+            {preview.rows[0]?.test_type && <> ({preview.rows[0].test_type})</>}
+          </div>
+          <div className="overflow-x-auto max-h-40">
+            <table className="w-full text-xs">
+              <thead className="bg-gray-50 sticky top-0"><tr>{active.map(c => <th key={c} className="px-2 py-1.5 text-left text-gray-500 font-medium whitespace-nowrap uppercase tracking-wider text-[10px]">{labels[c]}</th>)}</tr></thead>
+              <tbody className="divide-y divide-gray-100">{preview.rows.map((r, i) => <tr key={i} className="hover:bg-gray-50">{active.map(c => <td key={c} className="px-2 py-1 text-gray-700 whitespace-nowrap max-w-[120px] truncate num text-[11px]">{r[c] || '-'}</td>)}</tr>)}</tbody>
+            </table>
+          </div>
+        </div>
+      );
+    }
+
+    // ─── Suggestion Buttons ──────────────────────────────────────
+    function SuggestionButtons({ suggestions, onSelect }) {
+      if (!suggestions?.length) return null;
+      const colors = ['border-emerald-500/40 text-emerald-400 hover:bg-emerald-500/10', 'border-blue-500/40 text-blue-400 hover:bg-blue-500/10', 'border-amber-500/40 text-amber-400 hover:bg-amber-500/10', 'border-violet-500/40 text-violet-400 hover:bg-violet-500/10'];
+      return (
+        <div className="flex flex-wrap gap-2">
+          {suggestions.map((s, i) => {
+            const label = typeof s === 'string' ? s : s.label;
+            const query = typeof s === 'string' ? s : s.query;
+            return <button key={i} onClick={() => onSelect(query)} className={`px-3 py-1.5 border-2 rounded-full text-xs font-medium transition-colors ${colors[i % colors.length]}`}>{label}</button>;
+          })}
+        </div>
+      );
+    }
+
+    // ─── Card Proposal List (in chat) ────────────────────────────
+    function CardProposalList({ proposals, onApprove }) {
+      const [selected, setSelected] = useState(new Set());
+      const [acted, setActed] = useState(false);
+      if (acted) return <div className="mt-2 px-3 py-1.5 bg-emerald-500/10 border border-emerald-500/30 rounded text-xs text-emerald-400">Cards added.</div>;
+      const toggle = (i) => setSelected(p => { const n = new Set(p); n.has(i) ? n.delete(i) : n.add(i); return n; });
+      return (
+        <div className="mt-2 border border-blue-500/30 rounded bg-blue-500/10 p-2">
+          <p className="text-xs font-medium text-blue-300 mb-1">Proposed:</p>
+          {proposals.map((p, i) => (
+            <label key={i} className={`flex items-center gap-2 p-1 rounded cursor-pointer text-xs ${selected.has(i) ? 'bg-gray-100 border border-blue-500/30' : ''}`}>
+              <input type="checkbox" checked={selected.has(i)} onChange={() => toggle(i)} className="accent-blue-500" />
+              <span className="font-medium text-gray-800">{p.title}</span>
+            </label>
+          ))}
+          <div className="flex gap-2 mt-2">
+            <button onClick={() => { onApprove(proposals.filter((_, i) => selected.has(i))); setActed(true); }} disabled={selected.size === 0} className="px-2 py-1 bg-zwick-secondary text-white rounded text-xs disabled:opacity-50">Approve ({selected.size})</button>
+            <button onClick={() => setActed(true)} className="px-2 py-1 bg-gray-100 text-gray-700 rounded text-xs">Cancel</button>
+          </div>
+        </div>
+      );
+    }
+
+    // ─── Chat Sidebar (right panel) ──────────────────────────────
+    function ChatSidebar({ messages, loading, open, onToggle, onSend, onClear, stage, testIds, dataPreview, onBack, onApproveCards, lastUpdated, suggestions, fullwidth, onSavePrompt, savedPrompts, onSwitchMode, style }) {
+      const [input, setInput] = useState('');
+      const endRef = useRef(null);
+      useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages]);
+
+      const handleSend = (text) => {
+        const t = (text || input).trim();
+        if (!t || loading) return;
+        onSend(t);
+        if (!text) setInput('');
+      };
+
+      return (
+        <div className={`chat-sidebar ${open ? '' : 'collapsed'} ${fullwidth ? 'fullwidth' : ''} border-l border-gray-200 bg-white flex-shrink-0 flex flex-col h-full`} style={style}>
+          {open && <>
+            {/* Header */}
+            <div className="px-4 py-2.5 border-b border-gray-200 flex items-center justify-between flex-shrink-0">
+              <span className="text-sm font-semibold text-gray-800">Chat</span>
+              <div className="flex items-center gap-2">
+                {onSwitchMode && <button onClick={onSwitchMode} className="px-2 py-1 border border-gray-300 text-gray-600 rounded text-xs hover:bg-gray-100 transition-colors" title={fullwidth ? 'Switch to Dashboard + Chat' : 'Switch to Chat only'}>
+                  {fullwidth ? 'Show Dashboard' : 'Hide Dashboard'}
+                </button>}
+                {messages.length > 0 && <button onClick={onClear} className="p-1 text-gray-400 hover:text-red-500 transition-colors" title="Clear chat"><svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" /></svg></button>}
+                {!fullwidth && <button onClick={onToggle} className="p-1 text-gray-400 hover:text-gray-600 transition-colors" title="Close chat">
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                </button>}
+              </div>
+            </div>
+
+            {/* Data context bar */}
+            {stage === 'dashboard' && testIds?.length > 0 && (
+              <div className="px-3 py-1.5 bg-gray-50 border-b border-gray-200 text-xs text-gray-500">
+                <span className="num text-zwick-secondary font-medium">{testIds.length}</span> tests
+                {dataPreview?.rows?.[0]?.material && <> • <span className="text-gray-800 font-medium">{dataPreview.rows[0].material}</span></>}
+                {dataPreview?.rows?.[0]?.test_type && <> • {dataPreview.rows[0].test_type}</>}
+                <div className="flex items-center justify-between mt-1">
+                  {lastUpdated && <span className="text-gray-400 num">Updated {lastUpdated}</span>}
+                  <button onClick={onBack} className="text-zwick-secondary hover:text-red-700 font-medium transition-colors">Change data</button>
+                </div>
+              </div>
+            )}
+
+            {/* Messages */}
+            <div className="flex-1 overflow-y-auto px-3 py-3 space-y-2">
+              {messages.length === 0 && (
+                <div className="text-center py-8 text-gray-400 text-xs">
+                  <p className="mb-2">Ask me to add charts to your dashboard.</p>
+                  <p className="text-gray-300">e.g. "Plot stress-strain curves" or "Show me a distribution of Young's modulus"</p>
+                </div>
+              )}
+              {messages.map(msg => (
+                <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                  <div className={`max-w-[90%] rounded-lg px-3 py-2 text-sm ${msg.role === 'user' ? 'bg-gray-200' : 'bg-gray-50 text-gray-800 border border-gray-200'}`}>
+                    <Markdown text={msg.content} />
+                    {msg.cardProposals?.length > 0 && <CardProposalList proposals={msg.cardProposals} onApprove={onApproveCards} />}
+                    {msg.inlineCharts?.map((chart, ci) => (
+                      <InlineChatChart key={ci} chart={chart} />
+                    ))}
+                  </div>
+                  {msg.role === 'user' && onSavePrompt && !fullwidth && (
+                    <button onClick={() => onSavePrompt(msg.content)}
+                      className={`ml-1 p-1 rounded self-center flex-shrink-0 transition-colors ${savedPrompts?.includes(msg.content) ? 'text-amber-500' : 'text-gray-300 hover:text-gray-500'}`}
+                      title={savedPrompts?.includes(msg.content) ? 'Saved as widget default' : 'Save as widget default'}>
+                      <svg className="w-3.5 h-3.5" fill={savedPrompts?.includes(msg.content) ? 'currentColor' : 'none'} stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 5a2 2 0 012-2h10a2 2 0 012 2v16l-7-3.5L5 21V5z" /></svg>
+                    </button>
+                  )}
+                </div>
+              ))}
+              {loading && <div className="flex justify-start"><div className="bg-gray-50 rounded-lg px-3 py-2 border border-gray-200"><Spinner /></div></div>}
+              {/* Follow-up suggestions */}
+              {!loading && suggestions?.length > 0 && (
+                <div className="flex flex-wrap gap-1.5 pt-1">
+                  {suggestions.map((s, i) => (
+                    <button key={i} onClick={() => handleSend(s)} className="px-2.5 py-1 border border-gray-300 rounded-full text-xs text-gray-500 hover:text-gray-700 hover:border-gray-400 transition-colors">{s}</button>
+                  ))}
+                </div>
+              )}
+              <div ref={endRef} />
+            </div>
+
+            {/* Input */}
+            <div className="px-3 py-2.5 border-t border-gray-200 flex-shrink-0">
+              <div className="flex gap-2">
+                <input type="text" value={input} onChange={e => setInput(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && !e.shiftKey && handleSend()}
+                  placeholder="Ask or add a chart..."
+                  disabled={loading}
+                  className="flex-1 px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-zwick-secondary/50 focus:border-zwick-secondary bg-white text-gray-800 placeholder-gray-400" />
+                <button onClick={() => handleSend()} disabled={loading || !input.trim()}
+                  className="px-3 py-2 bg-zwick-secondary text-white rounded-lg text-sm hover:bg-red-700 disabled:opacity-40 transition-colors flex-shrink-0 font-medium">
+                  <svg height="20" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M2 21L23 12L2 3L2 10L17 12L2 14L2 21Z" 
+                          fill="currentColor"/>
+                  </svg>
+                </button>
+              </div>
+            </div>
+          </>}
+        </div>
+      );
+    }
+
+    // ─── Stage 1: Data Selection Content ─────────────────────────
+    function DataSelectionContent({ overview, dataPreview, onConfirm, onDismissPreview, onSuggestionSend, messages, chatMessages, chatLoading, onChatSend, chatExpanded, onToggleChatExpand, onClearChat, suggestions }) {
+      const testIds = extractTestIds(messages);
+      const [input, setInput] = useState('');
+      const endRef = useRef(null);
+      useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [chatMessages]);
+
+      const handleSend = (text) => {
+        const t = text || input.trim();
+        if (!t || chatLoading) return;
+        onChatSend(t);
+        setInput('');
+      };
+
+      return (
+        <div className="flex-1 flex flex-col overflow-auto bg-white">
+          <div className="flex-1 flex flex-col max-h-full justify-center max-w-3xl mx-auto w-full px-8 pb-6">
+            {/* Chat history (scrollable, above input) */}
+            <div className="mb-4 overflow-y-auto space-y-2 fade-in">
+              {/* Title */}
+              <div className="text-center mb-6 mt-2 fade-in">
+                <h1 className="text-3xl font-bold text-gray-800 mb-2">What material are we going to analyze today?</h1>
+              </div>
+              {chatMessages.map(msg => (
+                <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                  <div className={`max-w-[80%] rounded-xl px-4 py-2.5 text-sm ${msg.role === 'user' ? 'bg-gray-200 ' : 'bg-gray-50 text-gray-800 border border-gray-200'}`}>
+                    <Markdown text={msg.content} />
+                  </div>
+                </div>
+              ))}
+              {chatLoading && <div className="flex justify-start"><div className="bg-gray-50 rounded-xl px-4 py-2.5 border border-gray-200"><Spinner /></div></div>}
+              {!chatLoading && suggestions?.length > 0 && (
+                <div className="flex flex-wrap gap-2 mt-1">
+                  {suggestions.map((s, i) => (
+                    <button key={i} onClick={() => handleSend(s)} className="px-3 py-1.5 border border-zwick-secondary/40 text-zwick-secondary rounded-full text-xs font-medium transition-colors hover:bg-zwick-secondary/10">{s}</button>
+                  ))}
+                </div>
+              )}
+              <div ref={endRef} />
+            </div>
+
+            {/* Big centered input */}
+            <div className="rounded-2xl border border-gray-200 p-4 fade-in">
+              <div className="flex gap-3">
+                <input type="text" value={input} onChange={e => setInput(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && !e.shiftKey && handleSend()}
+                  placeholder="e.g. Steel tensile tests from Company 3..."
+                  disabled={chatLoading}
+                  className="flex-1 px-4 py-3 border border-gray-300 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-zwick-secondary/50 bg-white text-gray-800 placeholder-gray-400" />
+                <button onClick={() => handleSend()} disabled={chatLoading || !input.trim()}
+                  className="px-3 py-2 bg-zwick-secondary hover:bg-red-700 text-white rounded-lg text-sm font-bold transition-colors">
+                  <svg height="25" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M2 21L23 12L2 3L2 10L17 12L2 14L2 21Z" 
+                          fill="currentColor"/>
+                  </svg>
+                 </button>
+              </div>
+
+              {/* Suggestion chips below input — all same red */}
+              {chatMessages.length === 0 && (
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {[
+                    { label: 'What materials do we have?', query: 'What materials do we have?' },
+                    { label: 'All compression tests', query: 'All compression tests' },
+                    { label: 'Steel tensile tests from Company 3', query: 'Steel tensile tests from Company_3' },
+                  ].map((s, i) => (
+                    <button key={i} onClick={() => handleSend(s.query)} className="px-3 py-1.5 border border-zwick-secondary/40 text-zwick-secondary rounded-full text-xs font-medium transition-colors hover:bg-zwick-secondary/10">{s.label}</button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            
+            {/* Data Preview + Confirm */}
+            {dataPreview && dataPreview.rows?.length > 0 && (
+              <div className="mt-4 fade-in">
+                <div className="rounded-xl border border-zwick-secondary/30 overflow-hidden">
+                  <div className="flex items-center justify-between px-4 py-2 border-b border-zwick-secondary/20">
+                    <span className="text-xs font-semibold text-zwick-secondary">Is this the right data?</span>
+                  </div>
+                  <div className="p-4">
+                    <DataPreviewTable preview={dataPreview} />
+                  </div>
+                  <div className="px-4 py-3 border-t border-gray-200 flex items-center justify-between">
+                    <button onClick={onDismissPreview}
+                      className="px-4 py-2 text-gray-400 hover:text-gray-600 text-sm transition-colors">
+                      ✕ Dismiss
+                    </button>
+                    <div className="flex gap-3">
+                      <button onClick={() => onConfirm(testIds, dataPreview, 'chat_only')}
+                        className="px-5 py-2 border border-gray-300 text-gray-600 hover:bg-gray-50 rounded-lg text-sm font-medium transition-colors">
+                        Chat only
+                      </button>
+                      <button onClick={() => onConfirm(testIds, dataPreview, 'dashboard')}
+                        className="px-5 py-2 bg-zwick-secondary hover:bg-red-700 text-white rounded-lg text-sm font-bold transition-colors">
+                        Dashboard + Chat
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    // ─── Empty Block (+ button with dropdown) ────────────────────
+    function EmptyBlock({ testIds, dataPreview, onGenerate, savedPrompts, onRemoveSavedPrompt, onRemoveBlock }) {
+      const [menuOpen, setMenuOpen] = useState(false);
+      const [selected, setSelected] = useState(null);
+      const [prompt, setPrompt] = useState('');
+      const [customMode, setCustomMode] = useState(false);
+      const [customText, setCustomText] = useState('');
+      const [hiddenViz, setHiddenViz] = useState(loadHiddenVizOptions);
+      const count = testIds?.length || 0;
+      const mat = dataPreview?.rows?.[0]?.material || 'selected';
+
+      const visibleDefaults = DEFAULT_VIZ_OPTIONS.filter(o => !hiddenViz.includes(o.id));
+
+      const hideVizOption = (id) => {
+        setHiddenViz(prev => {
+          const next = [...prev, id];
+          localStorage.setItem('aimate_hidden_viz', JSON.stringify(next));
+          return next;
+        });
+      };
+      const restoreAllViz = () => {
+        setHiddenViz([]);
+        localStorage.removeItem('aimate_hidden_viz');
+      };
+
+      const handleSelect = (opt) => {
+        setSelected(opt);
+        setPrompt(`Show ${opt.label.toLowerCase()} for ${count} ${mat} tests`);
+        setMenuOpen(false);
+        setCustomMode(false);
+      };
+
+      const handleGenerate = () => {
+        onGenerate({ type: selected.type, title: selected.label, metric: selected.metric, description: selected.desc });
+        setSelected(null);
+        setPrompt('');
+      };
+
+      const handleCustomGenerate = () => {
+        if (!customText.trim()) return;
+        onGenerate({ type: 'custom_ai', title: customText.trim(), metric: customText.trim(), description: customText.trim() });
+        setCustomText('');
+        setCustomMode(false);
+        setMenuOpen(false);
+      };
+
+      // Idle state
+      if (!menuOpen && !selected && !customMode) {
+        return (
+          <div className="empty-block relative bg-surface-800/50 rounded-xl border-2 border-dashed border-gray-200 flex items-center justify-center min-h-[280px] hover:border-zwick-secondary/50 hover:bg-zwick-secondary/5 transition-all cursor-pointer group"
+            onClick={() => setMenuOpen(true)}>
+            {onRemoveBlock && <button onClick={(e) => { e.stopPropagation(); onRemoveBlock(); }}
+              className="absolute top-2 right-2 p-1 rounded text-gray-300 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-all" title="Remove block">
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+            </button>}
+            <div className="text-center">
+              <div className="w-12 h-12 rounded-full bg-gray-50 group-hover:bg-zwick-secondary/20 border border-gray-300 group-hover:border-zwick-secondary/40 flex items-center justify-center mx-auto mb-2 transition-all">
+                <span className="text-2xl text-gray-500 group-hover:text-zwick-secondary">+</span>
+              </div>
+              <p className="text-sm text-gray-500 group-hover:text-gray-700">Add visualization</p>
+            </div>
+          </div>
+        );
+      }
+
+      // Custom free-text mode
+      if (customMode) {
+        return (
+          <div className="bg-surface-800 rounded-xl border border-zwick-secondary/40 min-h-[280px] p-4 flex flex-col justify-center fade-in">
+            <p className="text-xs text-black-400 mb-2 font-medium">Custom request</p>
+            <textarea value={customText} onChange={e => setCustomText(e.target.value)}
+              placeholder="e.g. Generate a summary of all test parameters, or Compare specimen width vs max force"
+              rows={3}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm mb-3 focus:outline-none focus:ring-2 focus:ring-red-500 bg-surface-900 text-gray-800 placeholder-slate-600 resize-none" />
+            <div className="flex gap-2">
+              <button onClick={handleCustomGenerate} disabled={!customText.trim()} className="flex-1 px-4 py-2 bg-zwick-accent hover:bg-red-700 text-white rounded-lg text-sm font-bold transition-colors disabled:opacity-40">Generate</button>
+              <button onClick={() => { setCustomMode(false); setCustomText(''); setMenuOpen(true); }} className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg text-sm hover:bg-gray-200">Back</button>
+            </div>
+          </div>
+        );
+      }
+
+      // Menu open state
+      if (menuOpen) {
+        return (
+          <div className="rounded-xl border border-zwick-secondary/40 min-h-[280px] p-4 fade-in">
+            <div className="flex items-center justify-between mb-3">
+              <p className="text-sm font-semibold text-gray-800">Choose visualization</p>
+              <button onClick={() => setMenuOpen(false)} className="text-gray-500 hover:text-gray-700 text-sm">✕</button>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              {/* Default presets (deletable) */}
+              {visibleDefaults.map((opt) => (
+                <div key={opt.id} className="relative group/viz">
+                  <button onClick={() => handleSelect(opt)}
+                    className="w-full text-left p-3 rounded-lg border border-gray-200 hover:border-zwick-secondary/50 hover:bg-zwick-secondary/10 transition-all">
+                    <p className="text-xs font-medium text-gray-800">{opt.label}</p>
+                    <p className="text-xs text-gray-500 mt-0.5">{opt.desc}</p>
+                  </button>
+                  <button onClick={(e) => { e.stopPropagation(); hideVizOption(opt.id); }}
+                    className="absolute top-1 right-1 p-0.5 rounded bg-surface-900/80 text-gray-500 hover:text-red-400 opacity-0 group-hover/viz:opacity-100 transition-all" title="Hide this option">
+                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                  </button>
+                </div>
+              ))}
+              {/* Saved prompts as preset buttons */}
+              {savedPrompts?.map((p, i) => (
+                <div key={`saved-${i}`} className="relative group/viz">
+                  <button onClick={() => { onGenerate({ type: 'custom_ai', title: p, metric: p, description: p }); setMenuOpen(false); }}
+                    className="w-full text-left p-3 rounded-lg border border-amber-500/30 hover:border-amber-500/50 hover:bg-amber-500/10 transition-all">
+                    <p className="text-xs font-medium text-amber-400 truncate">{p}</p>
+                    <p className="text-xs text-gray-500 mt-0.5">Saved prompt</p>
+                  </button>
+                  {onRemoveSavedPrompt && <button onClick={(e) => { e.stopPropagation(); onRemoveSavedPrompt(p); }}
+                    className="absolute top-1 right-1 p-0.5 rounded bg-surface-900/80 text-gray-500 hover:text-red-400 opacity-0 group-hover/viz:opacity-100 transition-all" title="Remove saved prompt">
+                    <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
+                  </button>}
+                </div>
+              ))}
+              {/* Custom button */}
+              <button onClick={() => { setCustomMode(true); setMenuOpen(false); }}
+                className="text-left p-3 rounded-lg border border-gray-200 hover:border-zwick-secondary/50 hover:bg-zwick-secondary/10 transition-all col-span-2">
+                <p className="text-xs font-medium text-gray-800">Custom</p>
+                <p className="text-xs text-gray-500 mt-0.5">Write your own request — summary, comparison, table, anything</p>
+              </button>
+            </div>
+            {/* Restore hidden defaults link */}
+            {hiddenViz.length > 0 && (
+              <button onClick={restoreAllViz} className="mt-2 text-[10px] text-gray-500 hover:text-gray-600 transition-colors">
+                Restore {hiddenViz.length} hidden option{hiddenViz.length > 1 ? 's' : ''}
+              </button>
+            )}
+          </div>
+        );
+      }
+
+      // Prompt preview state
+      return (
+        <div className="bg-surface-800 rounded-xl border border-zwick-secondary/40 min-h-[280px] p-4 flex flex-col justify-center fade-in">
+          <p className="text-xs text-zwick-secondary mb-2 font-medium">{selected.label}</p>
+          <input type="text" value={prompt} onChange={e => setPrompt(e.target.value)}
+            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm mb-3 focus:outline-none focus:ring-2 focus:ring-zwick-secondary/50 bg-surface-900 text-gray-800" />
+          <div className="flex gap-2">
+            <button onClick={handleGenerate} className="flex-1 px-4 py-2 bg-zwick-accent hover:bg-red-700 text-white rounded-lg text-sm font-bold transition-colors">Generate</button>
+            <button onClick={() => { setSelected(null); setPrompt(''); }} className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg text-sm hover:bg-gray-200">Cancel</button>
+          </div>
+        </div>
+      );
+    }
+
+    // ─── Insight Card ────────────────────────────────────────────
+    function InsightCard({ card, onRemove, onTogglePin, span, onToggleSpan, onClickDataPoint, onRefetchSpc, onUpdateCard, onToggleWatch }) {
+      const plotRef = useRef(null);
+      const [threshold, setThreshold] = useState('');
+      const [showThresholdInput, setShowThresholdInput] = useState(false);
+      const isSpc = card.type === 'spc';
+      const [spcMode, setSpcMode] = useState(card.spc_mode || 'std3');
+      const [spcUcl, setSpcUcl] = useState(card.ucl ?? '');
+      const [spcLcl, setSpcLcl] = useState(card.lcl ?? '');
+      const [showSpcSettings, setShowSpcSettings] = useState(false);
+      const plotHeight = span === 2 ? 500 : 320;
+
+      useEffect(() => {
+        if (plotRef.current && card.plotData) {
+          const many = (card.plotData.data?.length || 0) > 5;
+          // Add threshold line if set
+          const shapes = [];
+          if (threshold && !isNaN(parseFloat(threshold))) {
+            shapes.push({
+              type: 'line', xref: 'paper', x0: 0, x1: 1, y0: parseFloat(threshold), y1: parseFloat(threshold),
+              line: { color: '#ef4444', width: 2, dash: 'dash' },
+            });
+          }
+          Plotly.newPlot(plotRef.current, card.plotData.data, {
+            ...card.plotData.layout,
+            shapes: [...(card.plotData.layout?.shapes || []), ...shapes],
+            annotations: card.plotData.layout?.annotations || [],
+            autosize: true,
+            margin: { t: 5, r: (card.plotData.layout?.annotations?.length > 0) ? 80 : 20, b: many ? 80 : 50, l: 70 },
+            height: plotHeight, font: { size: 11 },
+            paper_bgcolor: 'transparent', plot_bgcolor: '#ffffff',
+            xaxis: { ...card.plotData.layout?.xaxis, gridcolor: '#eee', zerolinecolor: '#ddd', color: '#555', tickfont: { color: '#666', size: 10 }, title: { ...card.plotData.layout?.xaxis?.title, font: { color: '#333', size: 12 } } },
+            yaxis: { ...card.plotData.layout?.yaxis, gridcolor: '#eee', zerolinecolor: '#ddd', color: '#555', tickfont: { color: '#666', size: 10 }, title: { ...card.plotData.layout?.yaxis?.title, font: { color: '#333', size: 12 } } },
+            legend: many ? { orientation: 'h', y: -0.25, x: 0.5, xanchor: 'center', font: { size: 9, color: '#444' }, bgcolor: 'transparent' } : { font: { size: 10, color: '#444' }, bgcolor: 'transparent' },
+            hovermode: 'closest',
+          }, { responsive: true, displayModeBar: 'hover', displaylogo: false, modeBarButtonsToRemove: ['lasso2d', 'select2d', 'autoScale2d'] });
+          // Click-to-explain: clicking a data point sends it to chat
+          plotRef.current.on('plotly_click', (data) => {
+            const pt = data.points[0];
+            if (pt && onClickDataPoint) {
+              const name = pt.data?.name || pt.x || '';
+              onClickDataPoint(`Tell me about specimen ${name} — what are its key properties and is anything unusual?`);
+            }
+          });
+        }
+      }, [card.plotData, span, threshold]);
+
+      return (
+        <div className={`bg-surface-800 rounded-xl border ${card.pinned ? 'border-amber-500/50' : 'border-gray-200'} overflow-hidden fade-in ${span === 2 ? 'col-span-2' : ''}`}>
+          <div className="flex items-center justify-between px-4 py-2 border-b border-gray-200 bg-surface-700/50">
+            <div className="min-w-0">
+              <h3 className="font-semibold text-sm text-gray-900 truncate">{card.title}</h3>
+              {card.subtitle && <p className="text-xs text-gray-500 num">{card.subtitle}</p>}
+            </div>
+            <div className="flex items-center gap-0.5 flex-shrink-0">
+              {card.plotData && <button onClick={() => card.hasNewData ? onUpdateCard?.(card.id) : onToggleWatch?.(card.id)}
+                className={`relative p-1.5 rounded text-xs transition-colors ${card.hasNewData ? 'text-amber-500 hover:bg-amber-50 animate-pulse' : card.watching ? 'text-amber-400 hover:bg-amber-50' : 'text-gray-400 hover:text-gray-600 hover:bg-gray-100'}`}
+                title={card.hasNewData ? 'New data available — click to refresh' : card.watching ? 'Watching for new data (click to stop)' : 'Click to watch for new data'}>
+                {card.hasNewData ? '🔔' : card.watching ? '🔔' : '🔕'}
+                {card.hasNewData && <span className="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full bg-amber-500"></span>}
+              </button>}
+              {showThresholdInput ? (
+                <div className="flex items-center gap-1 mr-1">
+                  <input type="number" value={threshold} onChange={e => setThreshold(e.target.value)}
+                    placeholder="e.g. 400" className="w-16 px-1.5 py-0.5 bg-surface-900 border border-gray-300 rounded text-xs text-gray-800 num focus:outline-none focus:ring-1 focus:ring-red-500/50" />
+                  <button onClick={() => setShowThresholdInput(false)} className="text-xs text-gray-500 hover:text-gray-700">✓</button>
+                </div>
+              ) : (
+                <button onClick={() => setShowThresholdInput(true)} className={`p-1.5 rounded hover:bg-gray-100 text-xs transition-colors ${threshold ? 'text-red-400' : 'text-gray-500 hover:text-gray-700'}`} title="Set threshold line">⚡</button>
+              )}
+              {card.stats && onClickDataPoint && <button onClick={() => onClickDataPoint(`Analyze the ${card.title} results: mean=${card.stats.mean?.toFixed(2)}, std=${card.stats.std?.toFixed(2)}, min=${card.stats.min?.toFixed(2)}, max=${card.stats.max?.toFixed(2)}, count=${card.stats.count}. Are these values normal? Any concerns?`)} className="p-1.5 rounded hover:bg-gray-100 text-gray-500 hover:text-blue-400 text-xs transition-colors" title="Ask AI about this">💬</button>}
+              <button onClick={onToggleSpan} className="p-1.5 rounded hover:bg-gray-100 text-gray-500 hover:text-gray-700 text-xs transition-colors" title="Resize">{span === 2 ? '⊟' : '⊞'}</button>
+              <button onClick={onRemove} className="p-1.5 rounded hover:bg-gray-100 text-gray-500 hover:text-red-400 text-xs transition-colors">✕</button>
+            </div>
+          </div>
+          <div className="p-3">
+            {/* SPC controls */}
+            {isSpc && (
+              <div className="mb-2 flex items-center gap-2 flex-wrap">
+                <div className="flex items-center bg-surface-900 rounded-lg border border-gray-200 p-0.5">
+                  <button onClick={() => { if (spcMode !== 'std3') { setSpcMode('std3'); onRefetchSpc?.(card.id, { spc_mode: 'std3' }); } }}
+                    className={`px-2.5 py-1 rounded text-xs font-medium transition-colors ${spcMode === 'std3' ? 'bg-zwick-secondary text-white' : 'text-gray-600 hover:text-gray-800'}`}>
+                    Mean ± 3σ
+                  </button>
+                  <button onClick={() => { setSpcMode('custom'); setShowSpcSettings(true); }}
+                    className={`px-2.5 py-1 rounded text-xs font-medium transition-colors ${spcMode === 'custom' ? 'bg-zwick-secondary text-white' : 'text-gray-600 hover:text-gray-800'}`}>
+                    Custom UCL/LCL
+                  </button>
+                </div>
+                {spcMode === 'custom' && showSpcSettings && (
+                  <div className="flex items-center gap-1.5 fade-in">
+                    <label className="text-[10px] text-gray-500">UCL:</label>
+                    <input type="number" value={spcUcl} onChange={e => setSpcUcl(e.target.value)}
+                      placeholder={card.stats?.ucl?.toFixed(1) || ''} className="w-16 px-1.5 py-0.5 bg-surface-900 border border-gray-300 rounded text-xs text-gray-800 num focus:outline-none focus:ring-1 focus:ring-zwick-secondary/50" />
+                    <label className="text-[10px] text-gray-500">LCL:</label>
+                    <input type="number" value={spcLcl} onChange={e => setSpcLcl(e.target.value)}
+                      placeholder={card.stats?.lcl?.toFixed(1) || ''} className="w-16 px-1.5 py-0.5 bg-surface-900 border border-gray-300 rounded text-xs text-gray-800 num focus:outline-none focus:ring-1 focus:ring-zwick-secondary/50" />
+                    <button onClick={() => { if (spcUcl && spcLcl) { onRefetchSpc?.(card.id, { spc_mode: 'custom', ucl: parseFloat(spcUcl), lcl: parseFloat(spcLcl) }); setShowSpcSettings(false); } }}
+                      className="px-2 py-0.5 bg-zwick-secondary text-white rounded text-xs font-medium hover:bg-red-700 transition-colors disabled:opacity-40" disabled={!spcUcl || !spcLcl}>Apply</button>
+                  </div>
+                )}
+              </div>
+            )}
+            {/* Stats row */}
+            {card.stats && (
+              <div className={`grid gap-1.5 mb-2 ${isSpc && spcMode === 'custom' ? 'grid-cols-7' : 'grid-cols-5'}`}>
+                {[
+                  ['Count', card.stats.count],
+                  ['Mean', card.stats.mean?.toFixed(2)],
+                  ['Std', card.stats.std?.toFixed(2)],
+                  ['Min', card.stats.min?.toFixed(2)],
+                  ['Max', card.stats.max?.toFixed(2)],
+                  ...(isSpc && spcMode === 'custom' ? [['UCL', card.stats.ucl?.toFixed(2)], ['LCL', card.stats.lcl?.toFixed(2)]] : []),
+                ].map(([l, v]) => (
+                  <div key={l} className="bg-surface-900 rounded p-1.5 text-center border border-gray-200">
+                    <p className="text-[10px] text-gray-500 uppercase tracking-wider">{l}</p>
+                    <p className={`text-xs font-medium num ${(l === 'UCL' || l === 'LCL') ? 'text-red-400' : 'text-gray-800'}`}>{v}</p>
+                  </div>
+                ))}
+                {isSpc && card.stats.ooc_count != null && (
+                  <div className={`bg-surface-900 rounded p-1.5 text-center border ${card.stats.ooc_count > 0 ? 'border-red-500/30' : 'border-emerald-500/30'}`}>
+                    <p className="text-[10px] text-gray-500 uppercase tracking-wider">OOC</p>
+                    <p className={`text-xs font-bold num ${card.stats.ooc_count > 0 ? 'text-red-400' : 'text-emerald-400'}`}>{card.stats.ooc_count}</p>
+                  </div>
+                )}
+              </div>
+            )}
+            {card.plotData ? <div ref={plotRef} />
+            : card.aiText ? <div className="rounded-lg p-4 border border-gray-200 max-h-72 overflow-y-auto">
+                <Markdown text={card.aiText} />
+                <button onClick={() => { onRemove(); }} className="mt-2 px-3 py-1 border border-gray-300 rounded text-xs text-gray-500 hover:text-zwick-secondary hover:border-zwick-secondary transition-colors">Dismiss</button>
+              </div>
+            : card.loading ? <div className="h-48 flex items-center justify-center"><Spinner /></div>
+            : card.error ? <div className="h-32 bg-red-500/10 rounded-lg flex items-center justify-center border border-dashed border-red-500/30"><p className="text-sm text-red-400 px-4 text-center">{card.error}</p></div>
+            : null}
+          </div>
+        </div>
+      );
+    }
+
+    // ─── Stage 2: Dashboard Content ──────────────────────────────
+    function DashboardContent({ cards, gridLayout, blockSpans, testIds, dataPreview, onAddCardToBlock, onRemoveCard, onTogglePin, onToggleSpan, onAddBlock, onFillCanvas, onMoveBlock, onClickDataPoint, onUpdateCard, onToggleWatch, insights, onGenerateInsights, gridCols, onSetGridCols, savedPrompts, onRemoveSavedPrompt, onRefetchSpc, onRemoveBlock }) {
+      const allEmpty = gridLayout.every(slot => slot === null);
+      const colsClass = gridCols === 3 ? 'grid-cols-3' : gridCols === 1 ? 'grid-cols-1' : 'grid-cols-2';
+      return (
+        <div id="dashboard-area" className="flex-1 overflow-auto p-5 bg-surface-100">
+          {/* Auto-insights banner */}
+          {insights && (
+            <div className="mx-auto mb-3 bg-surface-800 border border-blue-500/20 rounded-xl px-5 py-3 fade-in">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-xs text-blue-400 font-medium mb-1">🔍 Auto-Analysis</p>
+                  <p className="text-sm text-gray-700">{insights}</p>
+                </div>
+                {insights !== 'Analyzing results...' && (
+                  <button onClick={onGenerateInsights} className="text-xs text-blue-400 hover:text-blue-300 whitespace-nowrap mt-1 flex-shrink-0">↻ Re-analyze</button>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Fill Dashboard prompt when all empty */}
+          {allEmpty && (
+            <div className="mx-auto mb-4 flex items-center justify-between bg-surface-800 border border-gray-200 rounded-xl px-5 py-3 fade-in">
+              <div>
+                <p className="text-sm font-medium text-gray-800">Start building your dashboard</p>
+                <p className="text-xs text-gray-500">Click "+" on any block, or auto-fill with a standard overview.</p>
+              </div>
+              <button onClick={onFillCanvas}
+                className="px-4 py-2 bg-zwick-accent hover:bg-red-700 text-white rounded-lg text-sm font-bold transition-colors whitespace-nowrap">
+                Fill Dashboard
+              </button>
+            </div>
+          )}
+
+          <div className="mx-auto mb-3 flex justify-end">
+            <div className="flex items-center gap-1 bg-surface-800 border border-gray-200 rounded-lg p-0.5">
+              {[1, 2, 3].map(n => (
+                <button key={n} onClick={() => onSetGridCols(n)}
+                  className={`px-2 py-1 rounded text-xs transition-colors ${gridCols === n ? 'bg-zwick-secondary text-white' : 'text-gray-500 hover:text-gray-700'}`}
+                  title={`${n} column${n > 1 ? 's' : ''}`}>
+                  {Array(n).fill('▮').join('')}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className={`dashboard-grid grid ${colsClass} gap-4 mx-auto pl-8`}>
+            {gridLayout.map((cardId, idx) => {
+              const card = cardId ? cards.find(c => c.id === cardId) : null;
+              const span = blockSpans[idx] || 1;
+              const isFirst = idx === 0;
+              const isLast = idx === gridLayout.length - 1;
+
+              return (
+                <div key={cardId || `empty-${idx}`} className={`relative group/block ${span === 2 ? 'col-span-2' : ''}`}>
+                  {/* Reorder arrows */}
+                  <div className="absolute -left-7 top-1/2 -translate-y-1/2 flex flex-col gap-0.5 opacity-0 group-hover/block:opacity-100 transition-opacity z-10">
+                    {!isFirst && <button onClick={() => onMoveBlock(idx, idx - 1)} className="p-0.5 bg-gray-100 hover:bg-gray-200 rounded text-gray-600 hover:text-gray-800 transition-colors" title="Move up">
+                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" /></svg>
+                    </button>}
+                    {!isLast && <button onClick={() => onMoveBlock(idx, idx + 1)} className="p-0.5 bg-gray-100 hover:bg-gray-200 rounded text-gray-600 hover:text-gray-800 transition-colors" title="Move down">
+                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" /></svg>
+                    </button>}
+                  </div>
+
+                  {card
+                    ? <InsightCard card={card} span={span} onRemove={() => onRemoveCard(cardId)} onTogglePin={() => onTogglePin(cardId)} onToggleSpan={() => onToggleSpan(idx)} onClickDataPoint={onClickDataPoint} onRefetchSpc={onRefetchSpc} onUpdateCard={onUpdateCard} onToggleWatch={onToggleWatch} />
+                    : <EmptyBlock testIds={testIds} dataPreview={dataPreview} onGenerate={(cardDef) => onAddCardToBlock(idx, cardDef)} savedPrompts={savedPrompts} onRemoveSavedPrompt={onRemoveSavedPrompt}
+                        onRemoveBlock={gridLayout.length > 1 ? () => onRemoveBlock(idx) : undefined} />
+                  }
+                </div>
+              );
+            })}
+          </div>
+          <div className="mx-auto mt-4 flex justify-center">
+            <button onClick={onAddBlock} className="px-4 py-2 border-2 border-dashed border-gray-200 rounded-lg text-sm text-gray-500 hover:border-gray-300 hover:text-gray-600 transition-colors">+ Add block</button>
+          </div>
+        </div>
+      );
+    }
+
+    // ─── App ─────────────────────────────────────────────────────
+    function App() {
+      const [stage, setStage] = useState('select'); // 'select' | 'dashboard' | 'chat_only'
+      const [overview, setOverview] = useState(null);
+      const [dataPreview, setDataPreview] = useState(null);
+      const [confirmedTestIds, setConfirmedTestIds] = useState([]);
+      const [confirmedPreview, setConfirmedPreview] = useState(null);
+      const [cards, setCards] = useState([]);
+      const [gridLayout, setGridLayout] = useState([null]);
+      const [blockSpans, setBlockSpans] = useState({});
+      const [gridCols, setGridCols] = useState(1);
+      const [sessions, setSessions] = useState([]);
+      const [activeSession, setActiveSession] = useState(null);
+      const [sidebarOpen, setSidebarOpen] = useState(true);
+      const [chatMessages, setChatMessages] = useState([]);
+      const [chatLoading, setChatLoading] = useState(false);
+      const [chatExpanded, setChatExpanded] = useState(false);
+      const [savedPrompts, setSavedPrompts] = useState(() => {
+        try { return JSON.parse(localStorage.getItem('aimate_saved_prompts') || '[]'); } catch { return []; }
+      });
+      const [chatOpen, setChatOpen] = useState(true);
+      const [chatWidth, setChatWidth] = useState(null); // null = 50%
+      const [chatSuggestions, setChatSuggestions] = useState([]);
+      const [newTestCount, setNewTestCount] = useState(0);
+      const [insights, setInsights] = useState(null);
+      const [lastUpdated, setLastUpdated] = useState(null);
+      const [confirmedTotalCount, setConfirmedTotalCount] = useState(0);
+
+      useEffect(() => { getOverview().then(setOverview).catch(console.error); }, []);
+
+      const savePrompt = useCallback((text) => {
+        setSavedPrompts(prev => {
+          if (prev.includes(text)) return prev;
+          const next = [...prev, text];
+          localStorage.setItem('aimate_saved_prompts', JSON.stringify(next));
+          return next;
+        });
+      }, []);
+      const removeSavedPrompt = useCallback((text) => {
+        setSavedPrompts(prev => {
+          const next = prev.filter(p => p !== text);
+          localStorage.setItem('aimate_saved_prompts', JSON.stringify(next));
+          return next;
+        });
+      }, []);
+
+      // ─── Restore from shared URL hash ───
+      useEffect(() => {
+        const hash = window.location.hash.slice(1);
+        if (!hash) return;
+        try {
+          const state = JSON.parse(decodeURIComponent(atob(hash)));
+          if (state.testIds?.length > 0) {
+            setConfirmedTestIds(state.testIds);
+            setConfirmedPreview(state.preview);
+            setStage('dashboard');
+            if (state.gridLayout) setGridLayout(state.gridLayout.map(() => null));
+            if (state.blockSpans) setBlockSpans(state.blockSpans);
+            // Rebuild cards after a tick (need confirmedTestIds to be set)
+            setTimeout(() => {
+              if (state.cards) {
+                state.cards.forEach((c, i) => {
+                  const cardId = crypto.randomUUID();
+                  setCards(prev => [...prev, { id: cardId, ...c, pinned: false, plotData: null, loading: true }]);
+                  setGridLayout(prev => { const n = [...prev]; n[i] = cardId; return n; });
+                  fetchChartData(c.type, c.title, c.metric, state.testIds)
+                    .then(chart => {
+                      if (chart.plotData) setCards(prev => prev.map(x => x.id === cardId ? { ...x, plotData: chart.plotData, stats: chart.stats, subtitle: chart.subtitle, loading: false } : x));
+                      else { setCards(prev => prev.filter(x => x.id !== cardId)); setGridLayout(prev => prev.filter(slot => slot !== cardId)); }
+                    })
+                    .catch(() => { setCards(prev => prev.filter(x => x.id !== cardId)); setGridLayout(prev => prev.filter(slot => slot !== cardId)); });
+                });
+              }
+            }, 100);
+            window.location.hash = '';
+          }
+        } catch {}
+      }, []);
+
+      // ─── Periodic update check (every 30s in dashboard stage) ───
+      useEffect(() => {
+        if (stage !== 'dashboard' || !confirmedTestIds.length) {
+          setNewTestCount(0);
+          return;
+        }
+        const check = async () => {
+          try {
+            const mat = confirmedPreview?.rows?.[0]?.material;
+            const tt = confirmedPreview?.rows?.[0]?.test_type;
+            const cust = confirmedPreview?.rows?.[0]?.customer;
+            const result = await checkForUpdates(confirmedTestIds, mat, tt, cust);
+            const trueNewCount = Math.max(0, (result.current_total || 0) - confirmedTotalCount);
+            setNewTestCount(trueNewCount);
+            if (trueNewCount > 0) {
+              setCards(prev => prev.map(c => (c.plotData && c.watching) ? { ...c, hasNewData: true } : c));
+            }
+          } catch {}
+        };
+        const interval = setInterval(check, 30000);
+        return () => clearInterval(interval);
+      }, [stage, confirmedTestIds, confirmedPreview, confirmedTotalCount]);
+
+      // ─── Chat send (unified for both stages) ───
+      const handleChatSend = useCallback(async (text) => {
+        if (!text.trim() || chatLoading) return;
+        setChatMessages(prev => [...prev, { id: crypto.randomUUID(), role: 'user', content: text, ts: new Date() }]);
+        setChatLoading(true);
+        setChatExpanded(true);
+
+        // Create a session on the very first message if none exists yet
+        if (stage === 'select' && !activeSession) {
+          const sid = crypto.randomUUID();
+          const now = new Date();
+          const timeStr = now.toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+          setSessions(prev => [{ id: sid, name: 'New chat', testIds: [], preview: null, testCount: 0, createdAt: timeStr }, ...prev]);
+          setActiveSession(sid);
+        }
+        try {
+          let msg = text;
+          if ((stage === 'dashboard' || stage === 'chat_only') && confirmedTestIds.length > 0) {
+            const idsCtx = confirmedTestIds.slice(0, 20).map(id => `"${id}"`).join(', ');
+            const mat = confirmedPreview?.rows?.[0]?.material || '?';
+            const tt = confirmedPreview?.rows?.[0]?.test_type || '?';
+            const cust = confirmedPreview?.rows?.[0]?.customer || '?';
+            // Include visible chart summaries so AI can discuss them
+            const chartCtx = cards.filter(c => c.plotData || c.stats).map(c => {
+              let desc = `Chart: "${c.title}" (${c.type})`;
+              if (c.subtitle) desc += ` — ${c.subtitle}`;
+              if (c.stats) desc += ` | mean=${c.stats.mean?.toFixed(2)}, std=${c.stats.std?.toFixed(2)}, min=${c.stats.min?.toFixed(2)}, max=${c.stats.max?.toFixed(2)}, count=${c.stats.count}`;
+              if (c.plotData?.data) {
+                const names = c.plotData.data.map(t => t.name).filter(Boolean).slice(0, 15);
+                if (names.length) desc += ` | specimens: ${names.join(', ')}`;
+              }
+              return desc;
+            }).join('\n');
+            const dashCtx = chartCtx ? `\nVisible charts on dashboard:\n${chartCtx}` : '';
+            const modeCtx = stage === 'chat_only'
+              ? '\nThis is CHAT-ONLY mode. You CAN propose card_proposals — they will render as inline charts in the chat. Combine short text analysis with card_proposals for visualizations. Keep text brief, let the charts speak.'
+              : `${dashCtx}\nDo NOT ask for data — it is already loaded. The user can see the charts above. Answer questions about what they see. Create new visualizations when asked.`;
+            msg = `[CONTEXT: Dataset: ${confirmedTestIds.length} ${mat} ${tt} tests from ${cust}. Test IDs: [${idsCtx}].${modeCtx}] ${text}`;
+          }
+          const result = await sendChat(msg);
+          const allProposals = parseCardProposals(result.response);
+          const proposals = (stage === 'chat_only' || stage === 'select') ? null : allProposals;
+          let preview = parseDataPreview(result.tool_calls);
+          // If AI didn't call a data tool, try to extract filters from its response and fetch directly
+          if (!preview && stage === 'select') {
+            try {
+              // Parse filters from the user's message
+              const lower = text.toLowerCase();
+              const filters = {};
+              if (/company[_ ]?\d+/i.test(text)) filters.customer = text.match(/company[_ ]?\d+/i)[0].replace(' ', '_');
+              if (/steel/i.test(lower)) filters.material = 'Steel';
+              else if (/aluminium|aluminum/i.test(lower)) filters.material = 'Aluminium';
+              else if (/copper/i.test(lower)) filters.material = 'Copper';
+              if (/tensile/i.test(lower)) filters.test_type = 'tensile';
+              else if (/compression/i.test(lower)) filters.test_type = 'compression';
+              else if (/flexure/i.test(lower)) filters.test_type = 'flexure';
+              if (Object.keys(filters).length > 0) {
+                const params = new URLSearchParams({ ...filters, limit: '20' });
+                const res = await fetch(`${API}/data/summary?${params}`);
+                if (res.ok) {
+                  const data = await res.json();
+                  if (data.rows?.length > 0) preview = data;
+                  else if (Array.isArray(data) && data.length > 0) preview = { total: data.length, rows: data };
+                }
+              }
+            } catch {}
+          }
+          if (preview && stage === 'select') setDataPreview(preview);
+
+          // In chat-only mode, fetch chart data for proposals and attach inline
+          let inlineCharts = null;
+          if (stage === 'chat_only' && allProposals?.length > 0) {
+            inlineCharts = [];
+            for (const p of allProposals.slice(0, 3)) {
+              try {
+                const extra = {};
+                if (p.spc_mode) extra.spc_mode = p.spc_mode;
+                if (p.ucl != null) extra.ucl = p.ucl;
+                if (p.lcl != null) extra.lcl = p.lcl;
+                const chart = await fetchChartData(p.type, p.title, p.metric, confirmedTestIds, extra);
+                if (chart.plotData) inlineCharts.push({ title: p.title, plotData: chart.plotData, stats: chart.stats, subtitle: chart.subtitle });
+              } catch {}
+            }
+            if (inlineCharts.length === 0) inlineCharts = null;
+          }
+
+          setChatMessages(prev => [...prev, {
+            id: crypto.randomUUID(), role: 'assistant', content: cleanResponse(result.response),
+            ts: new Date(), toolCalls: result.tool_calls, cardProposals: proposals, inlineCharts,
+          }]);
+          // Generate context-aware follow-up suggestions
+          if (stage === 'select') {
+            if (preview) {
+              setChatSuggestions([
+                'Plot stress-strain curves',
+                'Show maximum force per specimen',
+                'Create SPC control chart',
+              ]);
+            } else {
+              setChatSuggestions([
+                'Steel tensile tests',
+                'All tests from Company_1',
+                'Show compression tests',
+                'What materials are available?',
+              ]);
+            }
+          } else if (stage === 'dashboard' || stage === 'chat_only') {
+            const mat = confirmedPreview?.rows?.[0]?.material || '';
+            const hasCards = cards.some(c => c.plotData);
+            if (proposals?.length > 0) {
+              setChatSuggestions([
+                `Compare ${mat} specimens`,
+                'Show distribution of results',
+                'Create SPC control chart',
+                'Identify outliers',
+              ]);
+            } else if (hasCards) {
+              setChatSuggestions([
+                'Analyze trends over time',
+                'Show SPC control chart',
+                'Which specimens are outliers?',
+                `Summarize ${mat} test results`,
+              ]);
+            } else {
+              setChatSuggestions([
+                'Plot stress-strain curves',
+                'Show maximum force per specimen',
+                "Compare Young's modulus",
+                'Create SPC control chart',
+              ]);
+            }
+          }
+        } catch (err) {
+          setChatMessages(prev => [...prev, { id: crypto.randomUUID(), role: 'assistant', content: `Error: ${err.message}`, ts: new Date() }]);
+        } finally { setChatLoading(false); }
+      }, [stage, chatLoading, chatMessages.length, confirmedTestIds, confirmedPreview]);
+
+      // ─── Card management ───
+      const handleAddCardToBlock = useCallback(async (blockIdx, cardDef, { silent = false } = {}) => {
+        const cardId = crypto.randomUUID();
+        setCards(prev => [...prev, { id: cardId, ...cardDef, pinned: false, plotData: null, loading: true }]);
+        setGridLayout(prev => { const n = [...prev]; n[blockIdx] = cardId; return n; });
+
+        if (cardDef.type === 'custom_ai' || cardDef.type === 'table') {
+          // Route through AI chat — ask it to propose a card_proposals chart
+          try {
+            const idsCtx = confirmedTestIds.slice(0, 20).map(id => `"${id}"`).join(', ');
+            const mat = confirmedPreview?.rows?.[0]?.material || '?';
+            const tt = confirmedPreview?.rows?.[0]?.test_type || '?';
+            const result = await sendWidgetChat(`[CONTEXT: ${confirmedTestIds.length} ${mat} ${tt} tests. IDs: [${idsCtx}]. If the user asks for a summary, table, or text analysis: use the tools (get_result_values, get_available_metrics, query_tests) to fetch REAL data, then write a detailed response with actual numbers. Do NOT propose card_proposals for text/summary requests. If the user asks for a chart/plot: respond with card_proposals JSON. Be specific with real values from the database.] ${cardDef.title}`);
+            const proposals = parseCardProposals(result.response);
+            if (proposals?.length > 0) {
+              const p = proposals[0];
+              // If AI proposed a table/text type, show the AI text directly
+              if (p.type === 'table' || p.type === 'text' || p.type === 'summary') {
+                const text = cleanResponse(result.response);
+                setCards(prev => prev.map(c => c.id === cardId ? { ...c, type: p.type, title: p.title, loading: false, aiText: text } : c));
+              } else {
+                // AI proposed a real chart — replace this placeholder card with the actual chart
+                const extra = {};
+                if (p.spc_mode) extra.spc_mode = p.spc_mode;
+                if (p.ucl != null) extra.ucl = p.ucl;
+                if (p.lcl != null) extra.lcl = p.lcl;
+                setCards(prev => prev.map(c => c.id === cardId ? { ...c, type: p.type, title: p.title, metric: p.metric, spc_mode: p.spc_mode, ucl: p.ucl, lcl: p.lcl } : c));
+                const chart = await fetchChartData(p.type, p.title, p.metric, confirmedTestIds, extra);
+                if (chart.plotData) {
+                  setCards(prev => prev.map(c => c.id === cardId ? { ...c, plotData: chart.plotData, stats: chart.stats, subtitle: chart.subtitle, loading: false } : c));
+                } else {
+                  // Chart data failed — fall back to showing AI text
+                  const text = cleanResponse(result.response);
+                  if (text) {
+                    setCards(prev => prev.map(c => c.id === cardId ? { ...c, loading: false, aiText: text, title: p.title } : c));
+                  } else {
+                    setCards(prev => prev.filter(c => c.id !== cardId));
+                    setGridLayout(prev => prev.filter(slot => slot !== cardId));
+                    if (!silent) setChatMessages(prev => [...prev, { id: crypto.randomUUID(), role: 'assistant', content: `⚠ Could not plot "${p.title}" — ${chart.error || 'no data found for this metric'}. Try a different metric.`, ts: new Date() }]);
+                  }
+                }
+              }
+            } else {
+              // No chart proposed — show text response
+              const text = cleanResponse(result.response);
+              setCards(prev => prev.map(c => c.id === cardId ? { ...c, loading: false, aiText: text } : c));
+            }
+          } catch (err) {
+            setCards(prev => prev.filter(c => c.id !== cardId));
+            setGridLayout(prev => prev.filter(slot => slot !== cardId));
+          }
+        } else {
+          try {
+            const extra = {};
+            if (cardDef.spc_mode) extra.spc_mode = cardDef.spc_mode;
+            if (cardDef.ucl != null) extra.ucl = cardDef.ucl;
+            if (cardDef.lcl != null) extra.lcl = cardDef.lcl;
+            const chart = await fetchChartData(cardDef.type, cardDef.title, cardDef.metric, confirmedTestIds, extra);
+            if (chart.plotData) {
+              setCards(prev => prev.map(c => c.id === cardId ? { ...c, plotData: chart.plotData, stats: chart.stats, subtitle: chart.subtitle, loading: false } : c));
+            } else {
+              setCards(prev => prev.filter(c => c.id !== cardId));
+              setGridLayout(prev => prev.filter(slot => slot !== cardId));
+              if (!silent) setChatMessages(prev => [...prev, { id: crypto.randomUUID(), role: 'assistant', content: `⚠ Could not plot "${cardDef.title}" — ${chart.error || 'no data found for this metric'}. Try a different metric or check the data.`, ts: new Date() }]);
+            }
+          } catch (err) {
+            setCards(prev => prev.filter(c => c.id !== cardId));
+            setGridLayout(prev => prev.filter(slot => slot !== cardId));
+            if (!silent) setChatMessages(prev => [...prev, { id: crypto.randomUUID(), role: 'assistant', content: `⚠ Failed to load "${cardDef.title}": ${err.message}`, ts: new Date() }]);
+          }
+        }
+      }, [confirmedTestIds, confirmedPreview]);
+
+      const handleRemoveCard = useCallback((cardId) => {
+        setCards(prev => prev.filter(c => c.id !== cardId));
+        setGridLayout(prev => prev.filter(slot => slot !== cardId));
+      }, []);
+
+      const handleRefetchSpc = useCallback(async (cardId, spcParams) => {
+        const card = cards.find(c => c.id === cardId);
+        if (!card) return;
+        setCards(prev => prev.map(c => c.id === cardId ? { ...c, loading: true } : c));
+        try {
+          const chart = await fetchChartData(card.type, card.title, card.metric, confirmedTestIds, spcParams);
+          if (chart.plotData) {
+            setCards(prev => prev.map(c => c.id === cardId ? { ...c, plotData: chart.plotData, stats: chart.stats, subtitle: chart.subtitle, loading: false, spc_mode: spcParams.spc_mode, ucl: spcParams.ucl, lcl: spcParams.lcl } : c));
+          } else {
+            setCards(prev => prev.filter(c => c.id !== cardId));
+            setGridLayout(prev => prev.filter(slot => slot !== cardId));
+          }
+        } catch (err) {
+          setCards(prev => prev.filter(c => c.id !== cardId));
+          setGridLayout(prev => prev.filter(slot => slot !== cardId));
+        }
+      }, [cards, confirmedTestIds]);
+
+      const handleApproveCards = useCallback((proposals) => {
+        // First, figure out which slots to use and expand grid if needed
+        setGridLayout(prev => {
+          let layout = [...prev];
+          const toAdd = [];
+          for (const p of proposals) {
+            const emptyIdx = layout.indexOf(null);
+            if (emptyIdx >= 0) {
+              toAdd.push({ idx: emptyIdx, card: { type: p.type, title: p.title, metric: p.metric, description: p.description, spc_mode: p.spc_mode, ucl: p.ucl, lcl: p.lcl } });
+              layout[emptyIdx] = 'pending'; // mark as taken
+            } else {
+              const newIdx = layout.length;
+              layout.push('pending');
+              toAdd.push({ idx: newIdx, card: { type: p.type, title: p.title, metric: p.metric, description: p.description, spc_mode: p.spc_mode, ucl: p.ucl, lcl: p.lcl } });
+            }
+          }
+          // Reset pending markers to null — handleAddCardToBlock will fill them
+          layout = layout.map(s => s === 'pending' ? null : s);
+          // Schedule card additions after layout update
+          setTimeout(() => {
+            toAdd.forEach(({ idx, card }) => handleAddCardToBlock(idx, card));
+          }, 0);
+          return layout;
+        });
+      }, [handleAddCardToBlock]);
+
+      const handleFillCanvas = useCallback(async () => {
+        const autoCards = [
+          { type: 'stress_strain', title: 'Stress-Strain Curves', metric: 'stress_strain', description: 'Overlay of all specimen curves' },
+          { type: 'stat_summary', title: 'Maximum Force', metric: 'Maximum force (Stress)', description: 'Max force per specimen' },
+          { type: 'stat_summary', title: "Young's Modulus", metric: "Young's modulus (Stress)", description: "Stiffness per specimen" },
+          { type: 'distribution', title: 'Strain at Break', metric: 'Strain at break (Ratio)', description: 'Distribution of strain at break' },
+          { type: 'stat_summary', title: 'Force at Break', metric: 'Result Force at break (Stress)', description: 'Force at break per specimen' },
+          { type: 'stat_summary', title: 'Test Duration', metric: 'Test duration (Time)', description: 'Duration per specimen' },
+        ];
+        const newLayout = autoCards.map(() => null);
+        setGridLayout(newLayout);
+        for (let i = 0; i < autoCards.length; i++) {
+          handleAddCardToBlock(i, autoCards[i], { silent: true });
+        }
+        // Generate auto-insights via AI
+        generateInsights();
+      }, [handleAddCardToBlock, confirmedTestIds, confirmedPreview]);
+
+      const generateInsights = useCallback(() => {
+        // Wait a few seconds for cards to load, then summarize their stats
+        setInsights('Analyzing results...');
+        setTimeout(() => {
+          // Collect stats from loaded cards
+          const statsLines = [];
+          cards.forEach(c => {
+            if (c.stats) {
+              statsLines.push(`${c.title}: mean=${c.stats.mean?.toFixed(2)}, std=${c.stats.std?.toFixed(2)}, min=${c.stats.min?.toFixed(2)}, max=${c.stats.max?.toFixed(2)}, count=${c.stats.count}`);
+            }
+            if (c.subtitle) statsLines.push(`${c.title}: ${c.subtitle}`);
+          });
+
+          const mat = confirmedPreview?.rows?.[0]?.material || 'selected';
+          const tt = confirmedPreview?.rows?.[0]?.test_type || '';
+          const statsCtx = statsLines.length > 0 ? `\nCard results:\n${statsLines.join('\n')}` : '';
+          const idsCtx = confirmedTestIds.slice(0, 10).map(id => `"${id}"`).join(', ');
+
+          sendChat(`[CONTEXT: Dashboard for ${confirmedTestIds.length} ${mat} ${tt} tests. Test IDs: [${idsCtx}].${statsCtx}\n\nBased on these results, give a 3-4 sentence analysis as a materials engineer would: Are the results consistent? Any outliers or specimens that deviate significantly? Is the standard deviation acceptable? Any trends worth investigating? Use the actual numbers from the card results above. Be specific — name specimen IDs if they stand out. No card_proposals.]`)
+            .then(r => setInsights(cleanResponse(r.response)))
+            .catch(err => setInsights('Could not generate insights: ' + err.message));
+        }, 5000); // Wait 5s for cards to finish loading
+      }, [confirmedTestIds, confirmedPreview, cards]);
+
+      const handleUpdateData = useCallback(async () => {
+        const mat = confirmedPreview?.rows?.[0]?.material;
+        const tt = confirmedPreview?.rows?.[0]?.test_type;
+        const cust = confirmedPreview?.rows?.[0]?.customer;
+        try {
+          const result = await checkForUpdates(confirmedTestIds, mat, tt, cust);
+          if (result.new_tests?.length > 0) {
+            const newIds = result.new_tests.map(t => t.id);
+            const newNames = result.new_tests.map(t => t.name).join(', ');
+            const allIds = [...confirmedTestIds, ...newIds];
+            const oldCount = confirmedTestIds.length;
+            setConfirmedTestIds(allIds);
+            setNewTestCount(0);
+            setLastUpdated(new Date().toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }));
+
+            // Store old stats for comparison
+            const oldStats = {};
+            cards.forEach(c => { if (c.stats) oldStats[c.id] = { ...c.stats }; });
+
+            // Re-fetch all existing cards with expanded test set
+            for (const card of cards) {
+              if (!card.plotData) continue;
+              try {
+                const chart = await fetchChartData(card.type, card.title, card.metric, allIds);
+                setCards(prev => prev.map(c => c.id === card.id ? { ...c, plotData: chart.plotData, stats: chart.stats, subtitle: chart.subtitle } : c));
+              } catch {}
+            }
+
+            // Generate "What changed?" summary
+            const changeMsg = `Dashboard updated: ${newIds.length} new specimen${newIds.length > 1 ? 's' : ''} added (${newNames}). Dataset grew from ${oldCount} → ${allIds.length} tests.`;
+            setInsights(changeMsg);
+
+            // Ask AI for deeper change analysis
+            sendChat(`[CONTEXT: Dashboard was just updated. ${newIds.length} new tests were added to a ${mat} ${tt} dataset (${oldCount} → ${allIds.length} tests). New specimens: ${newNames}. Give a 2-sentence analysis of what changed — did the mean shift? Are the new specimens consistent with the existing data? Be specific with numbers. No card_proposals.]`)
+              .then(r => setInsights(changeMsg + ' ' + cleanResponse(r.response)))
+              .catch(() => {});
+          }
+        } catch {}
+      }, [confirmedTestIds, confirmedPreview, cards]);
+
+      // ─── Per-card update: fetch new IDs if needed, refresh single card ───
+      const handleUpdateCard = useCallback(async (cardId) => {
+        const mat = confirmedPreview?.rows?.[0]?.material;
+        const tt = confirmedPreview?.rows?.[0]?.test_type;
+        const cust = confirmedPreview?.rows?.[0]?.customer;
+        let testIds = confirmedTestIds;
+        try {
+          // Fetch new test IDs and expand the confirmed set if not yet done
+          if (newTestCount > 0) {
+            const result = await checkForUpdates(confirmedTestIds, mat, tt, cust);
+            if (result.new_tests?.length > 0) {
+              const newIds = result.new_tests.map(t => t.id);
+              testIds = [...confirmedTestIds, ...newIds];
+              setConfirmedTestIds(testIds);
+              setConfirmedTotalCount(testIds.length);
+            }
+          }
+          // Refetch just this card
+          const card = cards.find(c => c.id === cardId);
+          if (card?.plotData) {
+            const chart = await fetchChartData(card.type, card.title, card.metric, testIds);
+            setCards(prev => prev.map(c => c.id === cardId ? { ...c, plotData: chart.plotData, stats: chart.stats, subtitle: chart.subtitle, hasNewData: false } : c));
+          }
+          // If all cards are now updated, clear newTestCount
+          setCards(prev => {
+            const stillPending = prev.some(c => c.id !== cardId && c.hasNewData);
+            if (!stillPending) setNewTestCount(0);
+            return prev;
+          });
+        } catch {}
+      }, [confirmedTestIds, confirmedPreview, newTestCount, cards]);
+
+      const handleToggleWatch = useCallback((cardId) => {
+        setCards(prev => prev.map(c => c.id === cardId ? { ...c, watching: !c.watching } : c));
+      }, []);
+
+      const handleClickDataPoint = useCallback((question) => {
+        handleChatSend(question);
+        setChatExpanded(true);
+      }, [handleChatSend]);
+
+      const handleMoveBlock = useCallback((fromIdx, toIdx) => {
+        setGridLayout(prev => {
+          const next = [...prev];
+          [next[fromIdx], next[toIdx]] = [next[toIdx], next[fromIdx]];
+          return next;
+        });
+        setBlockSpans(prev => {
+          const next = { ...prev };
+          const tmp = next[fromIdx];
+          next[fromIdx] = next[toIdx];
+          next[toIdx] = tmp;
+          return next;
+        });
+      }, []);
+
+      // ─── Stage transitions ───
+      const handleDataConfirmed = async (testIds, preview, mode = 'dashboard') => {
+        // Fetch ALL matching test IDs (preview may only have a subset due to limit)
+        let allIds = testIds;
+        if (preview?.rows?.length > 0) {
+          const row = preview.rows[0];
+          try {
+            const res = await fetch(`${API}/data/all-ids`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ customer: row.customer || null, material: row.material || null, test_type: row.test_type || null }) });
+            if (res.ok) {
+              const data = await res.json();
+              if (data.test_ids?.length > 0) allIds = data.test_ids;
+            }
+          } catch {}
+        }
+        setConfirmedTestIds(allIds);
+        setConfirmedPreview({ ...preview, total: allIds.length });
+        setConfirmedTotalCount(allIds.length);
+        setStage(mode === 'chat_only' ? 'chat_only' : 'dashboard');
+        setGridLayout([null]);
+        setBlockSpans({});
+        setCards([]);
+        setChatExpanded(false);
+        resetChatApi();
+        const name = preview?.rows?.[0]?.material || `Dashboard ${sessions.length + 1}`;
+        const now = new Date();
+        const timeStr = now.toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+
+        if (activeSession) {
+          // Update existing session (created when user first chatted)
+          setSessions(prev => prev.map(s => s.id === activeSession ? {
+            ...s, name, testIds: allIds, preview: { ...preview, total: allIds.length }, testCount: allIds.length, createdAt: timeStr,
+            savedState: { chatMessages, cards: [], gridLayout: [null], blockSpans: {}, gridCols: 1, insights: null, stage: mode === 'chat_only' ? 'chat_only' : 'dashboard' }
+          } : s));
+        } else {
+          // No session yet — create one
+          const sid = crypto.randomUUID();
+          setSessions(prev => [{ id: sid, name, testIds: allIds, preview: { ...preview, total: allIds.length }, testCount: allIds.length, createdAt: timeStr, savedState: { chatMessages, cards: [], gridLayout: [null], blockSpans: {}, gridCols: 1, insights: null, stage: mode === 'chat_only' ? 'chat_only' : 'dashboard' } }, ...prev]);
+          setActiveSession(sid);
+        }
+        setLastUpdated(timeStr);
+      };
+
+      const handleBack = () => {
+        saveCurrentSessionState();
+        setStage('select');
+        setChatMessages([]);
+        setChatExpanded(false);
+        resetChatApi();
+      };
+
+      // Save current session state into the sessions array
+      const saveCurrentSessionState = useCallback(() => {
+        if (!activeSession) return;
+        // Also save select-stage chats
+        if (stage === 'select' && chatMessages.length > 0) {
+          setSessions(prev => prev.map(s => s.id === activeSession ? { ...s, savedState: { ...s.savedState, chatMessages, stage } } : s));
+          return;
+        }
+        setSessions(prev => prev.map(s => s.id === activeSession ? {
+          ...s, savedState: { cards, gridLayout, blockSpans, chatMessages, gridCols, insights, stage }
+        } : s));
+      }, [activeSession, cards, gridLayout, blockSpans, chatMessages, gridCols, insights, stage]);
+
+      const handleNewSession = () => {
+        saveCurrentSessionState();
+        setStage('select');
+        setDataPreview(null);
+        setChatMessages([]);
+        setCards([]);
+        setGridLayout([null]);
+        setBlockSpans({});
+        setChatExpanded(false);
+        setChatSuggestions([]);
+        setActiveSession(null); // Clear so a new session gets created on first message
+        resetChatApi();
+      };
+
+      const handleSelectSession = (sid) => {
+        const s = sessions.find(x => x.id === sid);
+        if (s) {
+          saveCurrentSessionState();
+          setActiveSession(sid);
+          setConfirmedTestIds(s.testIds || []);
+          setConfirmedPreview(s.preview || null);
+          setDataPreview(s.preview || null);
+          // Restore saved state if available
+          if (s.savedState) {
+            const restoredCards = (s.savedState.cards || []).map(c => ({ ...c, plotData: null, loading: !!c.type && c.type !== 'custom_ai' }));
+            setCards(restoredCards);
+            setGridLayout(s.savedState.gridLayout || [null]);
+            setBlockSpans(s.savedState.blockSpans || {});
+            setChatMessages(s.savedState.chatMessages || []);
+            setGridCols(s.savedState.gridCols || 2);
+            setInsights(s.savedState.insights || null);
+            setStage(s.savedState.stage || 'dashboard');
+            // Re-fetch chart data for cards that need it
+            setTimeout(() => {
+              restoredCards.forEach(card => {
+                if (card.type && card.type !== 'custom_ai' && !card.aiText) {
+                  const extra = {};
+                  if (card.spc_mode) extra.spc_mode = card.spc_mode;
+                  if (card.ucl != null) extra.ucl = card.ucl;
+                  if (card.lcl != null) extra.lcl = card.lcl;
+                  fetchChartData(card.type, card.title, card.metric, s.testIds, extra)
+                    .then(chart => {
+                      if (chart.plotData) setCards(prev => prev.map(c => c.id === card.id ? { ...c, plotData: chart.plotData, stats: chart.stats, subtitle: chart.subtitle, loading: false } : c));
+                      else { setCards(prev => prev.filter(c => c.id !== card.id)); setGridLayout(prev => prev.map(slot => slot === card.id ? null : slot)); }
+                    })
+                    .catch(() => { setCards(prev => prev.filter(c => c.id !== card.id)); setGridLayout(prev => prev.map(slot => slot === card.id ? null : slot)); });
+                }
+              });
+            }, 100);
+          } else {
+            setCards([]);
+            setGridLayout([null]);
+            setBlockSpans({});
+            setChatMessages([]);
+            setStage('dashboard');
+          }
+          setChatExpanded(false);
+          setChatSuggestions([]);
+          resetChatApi();
+        }
+      };
+
+      // ─── Template ───
+      const fileInputRef = useRef(null);
+
+      return (
+        <div className="h-screen flex flex-col">
+          {/* Header */}
+          <header className="bg-gray-100 border-b px-4 py-1 flex items-center justify-between flex-shrink-0">
+            <div className="flex items-center gap-2">
+              <button onClick={() => setSidebarOpen(p => !p)} className="p-1.5 hover:bg-gray-100 rounded-lg text-gray-500 transition-colors" title="Toggle sessions">
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" /></svg>
+              </button>
+              <div className="flex items-baseline gap-0 select-none">
+                <svg width="65" height="20" viewBox="0 0 381 135" fill="none" xmlns="http://www.w3.org/2000/svg">
+<g clip-path="url(#clip0_1_844)">
+<path d="M64.1109 99.6719H40.6393L36.0201 116H20.1217L45.7418 37.7969H59.4381L84.5748 116H68.6764L64.1109 99.6719ZM44.3453 86.835H60.566L52.5631 58.0459L44.3453 86.835Z" fill="#010202"/>
+<path d="M160.034 37.7969L167.446 67.1768L175.879 37.7969H194.624V116H180.767V92.8506L181.411 56.2734L171.152 90.2188H163.687L154.502 57.7236L155.146 92.8506V116H141.289V37.7969H160.034Z" fill="#010202"/>
+<path d="M246.684 116C246.326 115.316 246.033 114.47 245.805 113.461C245.609 112.419 245.463 111.345 245.365 110.238C244.454 111.15 243.428 112.012 242.289 112.826C241.182 113.64 239.962 114.356 238.627 114.975C237.26 115.593 235.811 116.081 234.281 116.439C232.751 116.798 231.124 116.977 229.398 116.977C226.599 116.977 224.06 116.57 221.781 115.756C219.535 114.942 217.631 113.835 216.068 112.436C214.473 111.068 213.236 109.441 212.357 107.553C211.511 105.632 211.088 103.565 211.088 101.352C211.088 98.4544 211.658 95.9154 212.797 93.7344C213.969 91.5534 215.613 89.7305 217.729 88.2656C219.844 86.8333 222.383 85.7591 225.346 85.043C228.34 84.3268 231.677 83.9688 235.355 83.9688H245.219V79.8184C245.219 78.2233 244.926 76.791 244.34 75.5215C243.754 74.252 242.924 73.1615 241.85 72.25C240.775 71.3711 239.457 70.6875 237.895 70.1992C236.365 69.7109 234.639 69.4668 232.719 69.4668C230.928 69.4668 229.317 69.6947 227.885 70.1504C226.485 70.6061 225.297 71.2083 224.32 71.957C223.344 72.7057 222.579 73.6009 222.025 74.6426C221.505 75.6517 221.244 76.7096 221.244 77.8164H212.162C212.195 75.8958 212.683 74.0078 213.627 72.1523C214.604 70.2969 216.003 68.6204 217.826 67.123C219.617 65.6582 221.798 64.4701 224.369 63.5586C226.973 62.6471 229.919 62.1914 233.207 62.1914C236.202 62.1914 238.985 62.5658 241.557 63.3145C244.128 64.0306 246.358 65.1211 248.246 66.5859C250.102 68.0833 251.566 69.9388 252.641 72.1523C253.715 74.3659 254.252 76.9538 254.252 79.916V104.477C254.252 106.234 254.415 108.106 254.74 110.092C255.066 112.045 255.521 113.754 256.107 115.219V116H246.684ZM230.717 109.115C232.475 109.115 234.118 108.887 235.648 108.432C237.178 107.976 238.578 107.374 239.848 106.625C241.085 105.876 242.159 105.03 243.07 104.086C243.982 103.109 244.698 102.1 245.219 101.059V90.3652H236.82C233.695 90.3652 230.961 90.6419 228.617 91.1953C226.306 91.7161 224.467 92.5299 223.1 93.6367C222.123 94.418 221.374 95.3457 220.854 96.4199C220.365 97.4941 220.121 98.7148 220.121 100.082C220.121 101.384 220.333 102.589 220.756 103.695C221.212 104.802 221.879 105.746 222.758 106.527C223.637 107.341 224.743 107.976 226.078 108.432C227.413 108.887 228.959 109.115 230.717 109.115Z" fill="#9F9F9F"/>
+<path d="M317.475 50.0967H293.358V116H278.212V50.0967H254.418V37.7969H317.475V50.0967Z" fill="#010202"/>
+<path d="M339.807 116.977C336.096 116.977 332.678 116.342 329.553 115.072C326.46 113.803 323.807 112.029 321.594 109.75C319.38 107.471 317.655 104.77 316.418 101.645C315.181 98.5195 314.562 95.1178 314.562 91.4395V89.3887C314.562 85.1243 315.246 81.3158 316.613 77.9629C317.98 74.5775 319.803 71.7129 322.082 69.3691C324.328 67.0579 326.883 65.2839 329.748 64.0469C332.645 62.8099 335.607 62.1914 338.635 62.1914C342.443 62.1914 345.764 62.8587 348.596 64.1934C351.46 65.4954 353.837 67.3021 355.725 69.6133C357.613 71.957 359.012 74.7077 359.924 77.8652C360.868 81.0228 361.34 84.4408 361.34 88.1191V92.1719H323.596V92.5137C323.824 95.0853 324.328 97.3477 325.109 99.3008C325.923 101.254 327.03 102.979 328.43 104.477C329.862 106.072 331.587 107.325 333.605 108.236C335.624 109.148 337.854 109.604 340.295 109.604C343.518 109.604 346.382 108.952 348.889 107.65C351.395 106.348 353.479 104.623 355.139 102.475L360.656 106.771C358.898 109.441 356.262 111.817 352.746 113.9C349.263 115.951 344.95 116.977 339.807 116.977ZM338.635 69.6133C336.812 69.6133 335.087 69.9551 333.459 70.6387C331.831 71.2897 330.367 72.25 329.064 73.5195C327.762 74.8216 326.656 76.4167 325.744 78.3047C324.865 80.1602 324.247 82.3086 323.889 84.75H352.307V84.3105C352.307 82.6829 351.997 80.9414 351.379 79.0859C350.76 77.1979 349.898 75.5703 348.791 74.2031C347.684 72.8359 346.285 71.7292 344.592 70.8828C342.932 70.0365 340.946 69.6133 338.635 69.6133Z" fill="#9F9F9F"/>
+<path d="M112 13H127L111 116H96L112 13Z" fill="#EF4444"/>
+</g>
+<defs>
+<clipPath id="clip0_1_844">
+<rect width="381" height="135" fill="white"/>
+</clipPath>
+</defs>
+</svg>
+
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <input ref={fileInputRef} type="file" accept=".json" className="hidden" onChange={(e) => {
+                const file = e.target.files?.[0]; if (!file) return;
+                const reader = new FileReader();
+                reader.onload = (ev) => {
+                  try {
+                    const t = JSON.parse(ev.target.result);
+                    if (t.cards && t.gridLayout) {
+                      setGridLayout(t.gridLayout.map(() => null));
+                      t.cards.forEach((c, i) => { if (i < t.gridLayout.length) handleAddCardToBlock(i, c); });
+                    } else if (t.cards) {
+                      t.cards.forEach((c, i) => handleAddCardToBlock(i, c));
+                    }
+                  } catch { alert('Invalid template'); }
+                };
+                reader.readAsText(file); e.target.value = '';
+              }} />
+
+                {stage === 'dashboard' && (
+                  <>
+                    <button onClick={() => {
+                      const state = { testIds: confirmedTestIds, preview: confirmedPreview, cards: cards.map(c => ({ type: c.type, title: c.title, metric: c.metric, description: c.description, spc_mode: c.spc_mode })), gridLayout, blockSpans };
+                      window.location.hash = btoa(encodeURIComponent(JSON.stringify(state)));
+                      navigator.clipboard?.writeText(window.location.href).then(() => {
+                        setChatMessages(prev => [...prev, { id: crypto.randomUUID(), role: 'assistant', content: '🔗 Dashboard link copied to clipboard!', ts: new Date() }]);
+                      });
+                    }} className="px-2 py-1 border border-gray-300 text-gray-600 rounded-lg text-xs hover:bg-gray-100 transition-colors" title="Share dashboard link">
+                      🔗 Share
+                    </button>
+                    <button onClick={() => {
+                      const tmpl = JSON.stringify({ cards: cards.map(c => ({ type: c.type, title: c.title, metric: c.metric, description: c.description, spc_mode: c.spc_mode })), gridLayout, blockSpans, gridCols }, null, 2);
+                      const blob = new Blob([tmpl], { type: 'application/json' });
+                      const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `dashboard-${Date.now()}.json`; a.click();
+                    }} className="px-2 py-1 border border-gray-300 text-gray-600 rounded-lg text-xs hover:bg-gray-100 transition-colors" title="Save template">
+                      💾 Save
+                    </button>
+                    <button onClick={() => fileInputRef.current?.click()} className="px-2 py-1 border border-gray-300 text-gray-600 rounded-lg text-xs hover:bg-gray-100 transition-colors" title="Load template">
+                      📂 Load
+                    </button>
+                    <button onClick={() => window.print()} className="px-2 py-1 border border-gray-300 text-gray-600 rounded-lg text-xs hover:bg-gray-100 transition-colors" title="Print / PDF export">
+                      🖨 Print
+                    </button>
+                  </>
+                )}
+                {!chatOpen && <button onClick={() => setChatOpen(true)} className="px-2.5 py-1 border border-zwick-secondary/50 text-zwick-secondary rounded-lg text-xs hover:bg-zwick-secondary/10 transition-colors" title="Open chat">
+                  <svg className="w-4 h-4 inline-block mr-0.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" /></svg>
+                  Chat
+                </button>}
+
+            </div>
+          </header>
+
+          {/* Body: sidebar + content */}
+          <div className="flex-1 flex overflow-hidden">
+            <SessionSidebar sessions={sessions} activeSession={activeSession} onSelect={handleSelectSession} onCreate={handleNewSession} open={sidebarOpen} />
+            <div className="flex-1 flex overflow-hidden">
+              {stage === 'chat_only' ? (
+                /* Chat-only mode: full-width chat with switch button */
+                <div className="flex-1 flex flex-col h-full bg-white">
+                  <ChatSidebar messages={chatMessages} loading={chatLoading} open={true} fullwidth={true}
+                    onToggle={() => {}} onSend={handleChatSend}
+                    stage="dashboard" testIds={confirmedTestIds} dataPreview={confirmedPreview}
+                    onBack={handleBack} onApproveCards={handleApproveCards} lastUpdated={lastUpdated}
+                    suggestions={chatSuggestions} onSwitchMode={() => {
+                      // Move inline charts from chat to dashboard cards
+                      const inlineCharts = [];
+                      chatMessages.forEach(m => {
+                        if (m.inlineCharts) m.inlineCharts.forEach(c => inlineCharts.push(c));
+                      });
+                      if (inlineCharts.length > 0) {
+                        const newCards = [];
+                        const newLayout = [];
+                        inlineCharts.forEach((c, i) => {
+                          const cardId = crypto.randomUUID();
+                          newCards.push({ id: cardId, type: 'inline', title: c.title, plotData: c.plotData, stats: c.stats, subtitle: c.subtitle, pinned: false, loading: false });
+                          newLayout.push(cardId);
+                        });
+                        setCards(prev => [...prev, ...newCards]);
+                        setGridLayout(prev => {
+                          const cleaned = prev.filter(s => s !== null);
+                          return [...cleaned, ...newLayout, null];
+                        });
+                      }
+                      setStage('dashboard');
+                    }}
+                    onClear={() => { setChatMessages([]); setChatSuggestions([]); resetChatApi(); }} />
+                </div>
+              ) : (
+                <>
+                  <div className="flex-1 flex flex-col overflow-hidden" style={chatOpen && stage === 'dashboard' ? { flex: `0 0 ${chatWidth ? `calc(100% - ${chatWidth}px)` : '50%'}` } : undefined}>
+                    {stage === 'select'
+                      ? <DataSelectionContent overview={overview} dataPreview={dataPreview} onConfirm={handleDataConfirmed} onDismissPreview={() => setDataPreview(null)} onSuggestionSend={handleChatSend} messages={chatMessages}
+                          chatMessages={chatMessages} chatLoading={chatLoading} onChatSend={handleChatSend}
+                          chatExpanded={chatExpanded} onToggleChatExpand={() => setChatExpanded(p => !p)}
+                          onClearChat={() => { setChatMessages([]); resetChatApi(); }}
+                          suggestions={chatSuggestions} />
+                      : <DashboardContent cards={cards} gridLayout={gridLayout} blockSpans={blockSpans} testIds={confirmedTestIds} dataPreview={confirmedPreview}
+                          onAddCardToBlock={handleAddCardToBlock} onRemoveCard={handleRemoveCard}
+                          onTogglePin={(id) => setCards(p => p.map(c => c.id === id ? { ...c, pinned: !c.pinned } : c))}
+                          onToggleSpan={(idx) => setBlockSpans(p => ({ ...p, [idx]: (p[idx] || 1) === 1 ? 2 : 1 }))}
+                          onAddBlock={() => setGridLayout(p => [...p, null])}
+                          onFillCanvas={handleFillCanvas}
+                          onMoveBlock={handleMoveBlock}
+                          onClickDataPoint={handleClickDataPoint}
+                          onUpdateCard={handleUpdateCard}
+                          onToggleWatch={handleToggleWatch}
+                          insights={insights}
+                          onGenerateInsights={generateInsights}
+                          gridCols={gridCols}
+                          onSetGridCols={setGridCols}
+                          savedPrompts={savedPrompts}
+                          onRemoveSavedPrompt={removeSavedPrompt}
+                          onRefetchSpc={handleRefetchSpc}
+                          onRemoveBlock={(idx) => {
+                            setGridLayout(prev => prev.filter((_, i) => i !== idx));
+                            setBlockSpans(prev => { const n = {...prev}; delete n[idx]; return n; });
+                          }} />
+                    }
+                  </div>
+                  {stage === 'dashboard' && chatOpen && (
+                    <div className="resize-handle" onMouseDown={(e) => {
+                      e.preventDefault();
+                      const startX = e.clientX;
+                      const startW = chatWidth || (window.innerWidth * 0.5);
+                      const handle = e.target;
+                      handle.classList.add('active');
+                      const onMove = (ev) => {
+                        const delta = startX - ev.clientX;
+                        setChatWidth(Math.max(280, Math.min(window.innerWidth * 0.7, startW + delta)));
+                      };
+                      const onUp = () => { handle.classList.remove('active'); document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); };
+                      document.addEventListener('mousemove', onMove);
+                      document.addEventListener('mouseup', onUp);
+                    }} />
+                  )}
+                  {stage === 'dashboard' && <ChatSidebar messages={chatMessages} loading={chatLoading} open={chatOpen}
+                    style={chatOpen ? { width: chatWidth ? `${chatWidth}px` : '50%' } : undefined}
+                    onToggle={() => setChatOpen(p => !p)} onSend={handleChatSend}
+                    stage={stage} testIds={confirmedTestIds} dataPreview={confirmedPreview}
+                    onBack={handleBack} onApproveCards={handleApproveCards} lastUpdated={lastUpdated}
+                    suggestions={chatSuggestions} onSavePrompt={savePrompt} savedPrompts={savedPrompts}
+                    onSwitchMode={() => setStage('chat_only')}
+                    onClear={() => { setChatMessages([]); setChatSuggestions([]); resetChatApi(); }} />}
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
