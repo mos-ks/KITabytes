@@ -1,0 +1,27 @@
+services:
+  mongodb:
+    image: mongo:latest
+    container_name: mongo-secure
+    ports:
+      - "8000:27017"
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=schraube
+      - MONGO_INITDB_ROOT_PASSWORD=öwi0yß2älkjf8cx923
+    volumes:
+      - mongo-db-data:/data/db
+      - ./data:/backups
+      - ./ssl:/etc/ssl/mongo:ro # Mounting the whole folder is easier
+    command: 
+      - "mongod"
+      - "--auth"
+      - "--tlsMode"
+      - "requireTLS"
+      - "--tlsCertificateKeyFile"
+      - "/etc/ssl/mongo/mongodb.pem"
+      - "--tlsCAFile"
+      - "/etc/ssl/mongo/mongodb.crt"
+      - "--tlsAllowConnectionsWithoutCertificates"
+    restart: always
+
+volumes:
+  mongo-db-data:
